@@ -1,0 +1,60 @@
+# ── Python 
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.venv/
+venv/
+env/
+build/
+dist/
+
+# ── Node 
+node_modules/
+package-lock.json
+
+# ── Environment / secrets 
+.env
+.env.*
+!.env.example
+*.env.js
+cookies.txt
+
+# ── Database (regenerated automatically via Alembic on startup) 
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# ── Runtime data (regenerable, not source code) 
+music-extract/data/music-downloaded/*
+!music-extract/data/music-downloaded/.gitkeep
+music-extract/data/music-normalized/*
+!music-extract/data/music-normalized/.gitkeep
+music-extract/data/cookies/cookies-files/*
+!music-extract/data/cookies/cookies-files/.gitkeep
+
+spotify-api/definitions
+music-extract/definitions
+music-extract/app/db/*
+!music-extract/app/db/alembic.ini
+
+# ── Audio / media artifacts
+*.mp3
+*.wav
+*.flac
+*.m4a
+*.webm
+
+# ── Generated reports/exports (regenerate by running the app)
+*.csv
+
+# ── Logs
+*.log
+
+# ── OS / editor
+.DS_Store
+Thumbs.db
+.vscode/

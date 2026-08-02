@@ -1,0 +1,30 @@
+.git
+.gitignore
+README.md
+LICENSE
+
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+.venv
+venv
+
+# Runtime data — mounted as volumes at runtime, not needed in the image.
+music-extract/data/music-downloaded
+music-extract/data/music-normalized
+music-extract/data/cookies/cookies-files
+music-extract/app/db/*.sqlite*
+
+# Secrets — never baked into the image, injected via env_file at runtime.
+.env
+.env.*
+!.env.example
+*.env.js
+
+# Not part of the FastAPI service image.
+spotify-api
+node_modules
+
+*.log
+*.mp3
+*.csv

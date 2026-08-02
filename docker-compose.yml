@@ -1,0 +1,13 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - music-extract/.env
+    volumes:
+      - ./music-extract/data:/app/music-extract/data
+      - ./music-extract/app/db:/app/music-extract/app/db
+    restart: unless-stopped
