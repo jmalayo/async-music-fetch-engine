@@ -4,7 +4,7 @@ import time
 
 import requests
 
-_TRACK_ID_RE = re.compile(r"(?:open\.spotify\.com/track/|spotify:track:)([a-zA-Z0-9]+)")
+_TRACK_ID_RE = re.compile(r"(?:open\.spotify\.com/(?:intl-[a-zA-Z]+/)?track/|spotify:track:)([a-zA-Z0-9]+)")
 
 _token_cache: dict[str, tuple[str, float]] = {}
 

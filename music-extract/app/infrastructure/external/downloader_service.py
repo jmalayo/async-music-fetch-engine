@@ -1,4 +1,5 @@
 import time
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from sqlalchemy.orm import Session
@@ -15,6 +16,7 @@ from config.settings import (
     SPOTIFY_CLIENT_ID,
     SPOTIFY_CLIENT_SECRET,
     THREADS,
+    TRACK_TIMEOUT_S,
 )
 from infrastructure.persistence.database import SessionLocal
 from core import job_service
@@ -48,7 +50,13 @@ def _process_track(job_id: str, track_id: int, url: str, iteration_count: int, k
         out_dir = resolve_output_dir(db, job_id)
 
     t0 = time.monotonic()
-    result = download(
+
+    # yt_dlp.YoutubeDL corre in-process (no subprocess), no expone forma de cancelarlo a mitad de
+    # camino. El timeout es "blando": dejamos de esperar y seguimos con el siguiente track, pero el
+    # hilo de descarga sigue corriendo en background hasta que yt-dlp/ffmpeg terminen por su cuenta.
+    watchdog_pool = ThreadPoolExecutor(max_workers=1)
+    future = watchdog_pool.submit(
+        download,
         url,
         out_dir=out_dir,
         cookies_file=COOKIES_FILE,
@@ -60,6 +68,44 @@ def _process_track(job_id: str, track_id: int, url: str, iteration_count: int, k
         proxy=PROXY,
         known_meta=known_meta,
     )
+
+    try:
+        result = future.result(timeout=TRACK_TIMEOUT_S)
+    except concurrent.futures.TimeoutError:
+        watchdog_pool.shutdown(wait=False)
+        elapsed_s = time.monotonic() - t0
+
+        with SessionLocal() as db:
+            job_service.record_result(
+                db,
+                track_id,
+                iteration_count,
+                "skipped",
+                [{"proveedor": None, "resultado": "error", "mensaje": f"Timeout: supero los {TRACK_TIMEOUT_S}s de descarga, se omitio."}],
+                None,
+                None,
+                elapsed_s,
+            )
+        return
+    except Exception as e:
+        watchdog_pool.shutdown(wait=False)
+        elapsed_s = time.monotonic() - t0
+
+        with SessionLocal() as db:
+            job_service.record_result(
+                db,
+                track_id,
+                iteration_count,
+                "failed",
+                [{"proveedor": None, "resultado": "error", "mensaje": f"{type(e).__name__}: {e}"}],
+                None,
+                None,
+                elapsed_s,
+            )
+        return
+
+    watchdog_pool.shutdown(wait=False)
+
     elapsed_s = time.monotonic() - t0
 
     with SessionLocal() as db:

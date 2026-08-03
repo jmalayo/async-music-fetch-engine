@@ -11,7 +11,7 @@ engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread"
 
 @event.listens_for(engine, "connect")
 def _configure_sqlite(dbapi_conn, _):
-    dbapi_conn.execute("PRAGMA journal_mode=WAL")
+    dbapi_conn.execute("PRAGMA journal_mode=DELETE")
     dbapi_conn.execute("PRAGMA foreign_keys=ON")
 
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)

@@ -16,6 +16,7 @@ class DownloadStatusResponse(BaseModel):
     successful: int
     incorrect: int
     failed: int
+    skipped: int
     pending: int
     average_time_per_track_s: float | None
     elapsed_time_s: float
@@ -63,6 +64,7 @@ class FailedUrl(BaseModel):
     url: str
     title: str | None
     artist: str | None
+    status: str
     max_attempts: int
     total_attempts: int
     retries_attempted: int

@@ -35,7 +35,7 @@ def get_app_token() -> str:
 
     return r.json()["access_token"]
 
-def save_user_token(db: Session, token_data: dict) -> None:
+def save_user_token(db: Session, token_data: dict, client_id: str | None = None, client_secret: str | None = None) -> None:
     expires_at = (datetime.now(timezone.utc) + timedelta(seconds=token_data["expires_in"])).isoformat()
 
     row = db.query(SpotifyToken).first()
@@ -52,6 +52,11 @@ def save_user_token(db: Session, token_data: dict) -> None:
     row.expires_at = expires_at
     row.scope = token_data.get("scope")
 
+    if client_id:
+        row.client_id = client_id
+    if client_secret:
+        row.client_secret = client_secret
+
     db.commit()
 
 def get_user_token(db: Session) -> str | None:
@@ -65,12 +70,21 @@ def get_user_token(db: Session) -> str | None:
     if expires_at > datetime.now(timezone.utc) + timedelta(seconds=30):
         return row.access_token
 
+    client_id = row.client_id or SPOTIFY_CLIENT_ID
+    client_secret = row.client_secret or SPOTIFY_CLIENT_SECRET
+
     data = spotify_oauth.refresh_access_token(
-        row.refresh_token, client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET,
+        row.refresh_token, client_id=client_id, client_secret=client_secret,
     )
-    save_user_token(db, data)
+    save_user_token(db, data, client_id=client_id, client_secret=client_secret)
 
     return data["access_token"]
+
+def get_me(token: str) -> dict:
+    r = requests.get("https://api.spotify.com/v1/me", headers={"Authorization": f"Bearer {token}"}, timeout=15)
+    r.raise_for_status()
+
+    return r.json()
 
 def get_all_user_playlists(token: str) -> list[dict]:
     playlists = []
@@ -90,9 +104,7 @@ def get_all_user_playlists(token: str) -> list[dict]:
     return playlists
 
 def find_user_playlist(playlist_name: str, token: str) -> dict | None:
-    me = requests.get("https://api.spotify.com/v1/me", headers={"Authorization": f"Bearer {token}"}, timeout=15)
-    me.raise_for_status()
-    user_id = me.json()["id"]
+    user_id = get_me(token)["id"]
 
     target = job_service.normalize_name(playlist_name)
     all_playlists = get_all_user_playlists(token)
