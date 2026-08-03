@@ -124,6 +124,9 @@ def create_job(db: Session, job_type: str, playlist_name: str | None, urls: list
             else:
                 track_rows.append((track.track_id, track.url, meta))
 
+        if not track_rows:
+            _update_job_status(db, job_id)
+
         db.commit()
 
     return job_id, track_rows
@@ -143,21 +146,24 @@ def resolve_job_by_name(db: Session, playlist_name: str) -> str | None:
     candidates.sort(key=lambda j: j.created_at, reverse=True)
     return candidates[0].job_id
 
-def find_existing_playlist_job(db: Session, playlist_id: str | None, playlist_name: str) -> str | None:
-    target_name = normalize_name(playlist_name)
+def find_existing_job(db: Session, job_type: str, name: str | None, external_id: str | None = None) -> str | None:
+    if not name and not external_id:
+        return None
 
-    jobs = db.query(Job).filter(Job.type == "playlist-urls").all()
+    target_name = normalize_name(name or "")
+
+    jobs = db.query(Job).filter(Job.type == job_type).all()
 
     for j in jobs:
-        matches_id = playlist_id is not None and j.playlist_id == playlist_id
-        matches_name = normalize_name(j.playlist_name or "") == target_name
+        matches_id = external_id is not None and j.playlist_id == external_id
+        matches_name = bool(target_name) and normalize_name(j.playlist_name or "") == target_name
 
         if matches_id or matches_name:
             return j.job_id
 
     return None
 
-def resume_or_retry_playlist_job(db: Session, job_id: str, playlist_id: str | None, urls: list[str], meta_by_url: dict[str, dict] | None = None) -> tuple[list[tuple[int, str, dict | None]], int]:
+def resume_or_retry_job(db: Session, job_id: str, external_id: str | None, urls: list[str], meta_by_url: dict[str, dict] | None = None) -> tuple[list[tuple[int, str, dict | None]], int]:
     meta_by_url = meta_by_url or {}
 
     with _lock:
@@ -211,21 +217,33 @@ def resume_or_retry_playlist_job(db: Session, job_id: str, playlist_id: str | No
         if to_enqueue:
             job = db.get(Job, job_id)
 
-            if playlist_id and not job.playlist_id:
-                job.playlist_id = playlist_id
+            if external_id and not job.playlist_id:
+                job.playlist_id = external_id
 
             job.amount = job.amount + new_count
             job.status = "in_progress"
             job.updated_at = now
+            job.elapsed_time_s = None
 
             db.commit()
 
             return to_enqueue, 0
 
+        _update_job_status(db, job_id)
         db.commit()
 
     iteration_count, retry_tracks = retry(db, job_id)
     return retry_tracks, (iteration_count or 0)
+
+def submit_job(db: Session, job_type: str, name: str | None, urls: list[str], external_id: str | None = None, meta_by_url: dict[str, dict] | None = None) -> tuple[str, list[tuple[int, str, dict | None]], int]:
+    existing_job_id = find_existing_job(db, job_type, name, external_id)
+
+    if existing_job_id:
+        tracks, iteration_count = resume_or_retry_job(db, existing_job_id, external_id, urls, meta_by_url)
+        return existing_job_id, tracks, iteration_count
+
+    job_id, tracks = create_job(db, job_type, name, urls, playlist_id=external_id, meta_by_url=meta_by_url)
+    return job_id, tracks, 0
 
 def mark_in_progress(db: Session, track_id: int) -> None:
     with _lock:
@@ -240,11 +258,14 @@ def _update_job_status(db: Session, job_id: str) -> None:
     if pending_count > 0:
         return
 
-    failed_count = db.query(Track).filter(Track.job_id == job_id, Track.status.in_(["failed", "incorrect"])).count()
+    failed_count = db.query(Track).filter(Track.job_id == job_id, Track.status.in_(["failed", "incorrect", "skipped"])).count()
 
     job = db.get(Job, job_id)
+    now = datetime.now(timezone.utc)
+
     job.status = "completed_with_errors" if failed_count > 0 else "completed"
-    job.updated_at = _now()
+    job.updated_at = now.isoformat()
+    job.elapsed_time_s = round((now - datetime.fromisoformat(job.created_at)).total_seconds(), 1)
 
 def _count_requeued(db: Session, job_id: str, iteration_count: int) -> int:
     retry_row = db.query(Retry).filter(Retry.job_id == job_id, Retry.iteration_count == iteration_count).first()
@@ -355,10 +376,16 @@ def _calculate_eta(db: Session, job_id: str, pending_count: int) -> float | None
         return None
 
     average = sum(r[0] for r in rows) / len(rows)
-    return round(average * pending_count, 1)
+
+    return round(average * pending_count, 1)    
+
+def get_latest_job_id(db: Session) -> str | None:
+    job = db.query(Job).order_by(Job.updated_at.desc()).first()
+    return job.job_id if job else None
 
 def get_status(db: Session, job_id: str) -> DownloadStatusResponse | None:
     job = db.get(Job, job_id)
+    
     if not job:
         return None
 
@@ -366,6 +393,7 @@ def get_status(db: Session, job_id: str) -> DownloadStatusResponse | None:
     successful_count = track_query.filter(Track.status == "successful").count()
     incorrect_count = track_query.filter(Track.status == "incorrect").count()
     failed_count = track_query.filter(Track.status == "failed").count()
+    skipped_count = track_query.filter(Track.status == "skipped").count()
     pending_count = track_query.filter(Track.status.in_(["pending", "in_progress"])).count()
 
     eta = _calculate_eta(db, job_id, pending_count)
@@ -377,10 +405,17 @@ def get_status(db: Session, job_id: str) -> DownloadStatusResponse | None:
         .limit(ETA_WINDOW)
         .all()
     )
-    average_time = round(sum(r[0] for r in duration_rows) / len(duration_rows), 1) if len(duration_rows) >= 3 else None
 
-    created = datetime.fromisoformat(job.created_at)
-    elapsed = round((datetime.now(timezone.utc) - created).total_seconds(), 1)
+    if len(duration_rows) < 3:
+        average_time = None
+    else:
+        average_time = round(sum(r[0] for r in duration_rows) / len(duration_rows), 1)
+
+    if job.elapsed_time_s is not None:
+        elapsed = job.elapsed_time_s
+    else:
+        created = datetime.fromisoformat(job.created_at)
+        elapsed = round((datetime.now(timezone.utc) - created).total_seconds(), 1)
 
     last_retry_row = db.query(Retry).filter(Retry.job_id == job_id).order_by(Retry.iteration_count.desc()).first()
 
@@ -405,6 +440,7 @@ def get_status(db: Session, job_id: str) -> DownloadStatusResponse | None:
         successful=successful_count,
         incorrect=incorrect_count,
         failed=failed_count,
+        skipped=skipped_count,
         pending=pending_count,
         average_time_per_track_s=average_time,
         elapsed_time_s=elapsed,
@@ -456,7 +492,7 @@ def get_track(db: Session, job_id: str, track_id: int) -> TrackDetailResponse | 
     )
 
 def list_failed(db: Session, job_id: str) -> list[FailedUrl]:
-    tracks = db.query(Track).filter(Track.job_id == job_id, Track.status == "failed").all()
+    tracks = db.query(Track).filter(Track.job_id == job_id, Track.status.in_(["failed", "skipped"])).all()
 
     result = []
     for t in tracks:
@@ -468,6 +504,7 @@ def list_failed(db: Session, job_id: str) -> list[FailedUrl]:
             url=t.url,
             title=t.title,
             artist=t.artist,
+            status=t.status,
             max_attempts=t.max_attempts,
             total_attempts=len(t.attempts),
             retries_attempted=retry_rounds,
@@ -480,7 +517,7 @@ def list_failed(db: Session, job_id: str) -> list[FailedUrl]:
 
 def retry(db: Session, job_id: str) -> tuple[int | None, list[tuple[int, str, dict | None]]]:
     with _lock:
-        failed_tracks = db.query(Track).filter(Track.job_id == job_id, Track.status == "failed").all()
+        failed_tracks = db.query(Track).filter(Track.job_id == job_id, Track.status.in_(["failed", "skipped"])).all()
 
         candidates = [t for t in failed_tracks if _rounds_involved(db, job_id, t) < MAX_RETRIES_PER_TRACK]
 
@@ -499,6 +536,7 @@ def retry(db: Session, job_id: str) -> tuple[int | None, list[tuple[int, str, di
         job = db.get(Job, job_id)
         job.status = "in_progress"
         job.updated_at = now
+        job.elapsed_time_s = None
 
         db.commit()
 

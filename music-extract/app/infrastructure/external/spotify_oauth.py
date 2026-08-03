@@ -1,6 +1,7 @@
 import secrets
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
@@ -54,7 +55,7 @@ def wait_for_auth_code(port: int, expected_state: str) -> str:
         def log_message(self, format, *args):
             return
 
-    httpd = HTTPServer(("127.0.0.1", port), _Handler)
+    httpd = HTTPServer(("0.0.0.0", port), _Handler)
     httpd.handle_request()
     httpd.server_close()
 
@@ -98,7 +99,10 @@ def run_authorization_flow(*, client_id: str, client_secret: str, redirect_uri: 
     state = secrets.token_hex(8)
     url = build_authorize_url(client_id, redirect_uri, scopes, state)
 
-    webbrowser.open(url)
+    if Path("/.dockerenv").exists():
+        print(f"Autorizacion Spotify: abri esta URL en el navegador de tu maquina -> {url}", flush=True)
+    else:
+        webbrowser.open(url)
 
     code = wait_for_auth_code(port, state)
 

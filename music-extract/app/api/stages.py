@@ -9,27 +9,16 @@ from fastapi.responses import StreamingResponse
 import pandas as pd
 import io
 
-def _build_response(db: Session, job_id: str, format: str | None):
-    urls = job_service.list_failed(db, job_id)
-
-    if format == "csv":
-        df = pd.DataFrame([u.model_dump() for u in urls])
-        buffer = io.StringIO()
-        df.to_csv(buffer, sep=",", index=False)
-        buffer.seek(0)
-
-        return StreamingResponse(
-            iter([buffer.getvalue()]),
-            media_type="text/csv",
-            headers={"Content-Disposition": f"attachment; filename={job_id}_failed.csv"},
-        )
-
-    return FailedUrlsResponse(job_id=job_id, total_failed=len(urls), urls=urls)
-
 router = APIRouter(prefix="/stages", tags=["Estados de descarga"])
 
-@router.get("/view-download-status/{job_id}", response_model=DownloadStatusResponse)
-def get_status(job_id: str, db: Session = Depends(get_db)):
+@router.get("/view-download-status", response_model=DownloadStatusResponse)
+def get_status(job_id: str | None = None, db: Session = Depends(get_db)):
+    if job_id is None:
+        job_id = job_service.get_latest_job_id(db)
+
+        if job_id is None:
+            raise HTTPException(404, "No hay jobs registrados todavia")
+
     status = job_service.get_status(db, job_id)
 
     if not status:
@@ -37,15 +26,25 @@ def get_status(job_id: str, db: Session = Depends(get_db)):
 
     return status
 
-@router.get("/view-failed-urls/{job_id}", response_model=FailedUrlsResponse)
-def get_failed_urls(job_id: str, format: str | None = None, db: Session = Depends(get_db)):
+@router.get("/view-failed-urls", response_model=FailedUrlsResponse)
+def get_failed_urls(job_id: str | None = None, db: Session = Depends(get_db)):
+    
+    if job_id is None:
+        job_id = job_service.get_latest_job_id(db)
+
+        if job_id is None:
+            raise HTTPException(404, "No hay jobs registrados todavia")
+
     job = job_service.get_job(db, job_id)
 
     if not job:
         raise HTTPException(404, f"No existe el job {job_id}")
 
-    return _build_response(db, job_id, format)
+    urls = job_service.list_failed(db, job_id)
 
-@router.get("/view-history", response_model=list[JobSummary])
+    return FailedUrlsResponse(job_id=job_id, total_failed=len(urls), urls=urls)
+
+@router.get("/view-all-jobs", response_model=list[JobSummary])
 def get_history(db: Session = Depends(get_db)):
+    
     return job_service.list_jobs(db)

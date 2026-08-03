@@ -14,6 +14,7 @@ class Job(Base):
     playlist_id = Column(String(64), nullable=True)
     amount = Column(Integer, nullable=False)
     status = Column(String(16), nullable=False)
+    elapsed_time_s = Column(Float, nullable=True)
 
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat(), onupdate=datetime.now(timezone.utc).isoformat(), nullable=False)
     updated_at = Column(String, default=datetime.now(timezone.utc).isoformat(), onupdate=datetime.now(timezone.utc).isoformat(), nullable=False)
@@ -85,5 +86,7 @@ class SpotifyToken(Base):
     refresh_token = Column(Text, nullable=False)
     expires_at = Column(String, nullable=False)
     scope = Column(String(255), nullable=True)
+    client_id = Column(String(64), nullable=True)
+    client_secret = Column(String(64), nullable=True)
 
     updated_at = Column(String, default=datetime.now(timezone.utc).isoformat(), onupdate=datetime.now(timezone.utc).isoformat(), nullable=False)

@@ -7,32 +7,27 @@ from sqlalchemy.orm import Session
 
 from infrastructure.external import spotify_client
 from infrastructure.persistence.database import get_db
-from api.schemas import (
-    DownloadMusicManualRequest,
-    DownloadMusicManualResponse,
-    DownloadPlaylistSpotifyRequest,
-    DownloadPlaylistSpotifyResponse,
-    RetryResponse,
-)
+from api.schemas import DownloadMusicManualRequest, DownloadPlaylistSpotifyRequest
+from core.schemas import DownloadStatusResponse
 from core import job_service
 from infrastructure.external import downloader_service
 
-router = APIRouter(prefix="/downloads", tags=["Descargar música"])
+router = APIRouter(prefix="/downloads", tags=["Downloader"])
 
-@router.post("/download-music-manual", response_model=DownloadMusicManualResponse, status_code=202)
+@router.post("/download-urls-manual", response_model=DownloadStatusResponse, status_code=202)
 def download_music_manual(body: DownloadMusicManualRequest, db: Session = Depends(get_db)):
     urls = [u.strip() for u in body.urls if u and u.strip()]
 
     if not urls:
         raise HTTPException(422, "urls no puede estar vacio")
 
-    job_id, tracks = job_service.create_job(db, "manual-urls", body.group_name, urls)
+    job_id, tracks, iteration_count = job_service.submit_job(db, "manual-urls", body.group_name, urls)
 
-    downloader_service.enqueue_job(job_id, tracks)
+    downloader_service.enqueue_job(job_id, tracks, iteration_count=iteration_count)
 
-    return DownloadMusicManualResponse(job_id=job_id, type="manual-urls", group_name=body.group_name, total=len(urls))
+    return job_service.get_status(db, job_id)
 
-@router.post("/download-playlist-spotify", response_model=DownloadPlaylistSpotifyResponse, status_code=202)
+@router.post("/download-spotify-playlist", response_model=DownloadStatusResponse, status_code=202)
 def download_playlist_spotify(body: DownloadPlaylistSpotifyRequest, db: Session = Depends(get_db)):
     try:
         playlist, spotify_tracks = spotify_client.search_and_get_tracks(body.playlist_name, db)
@@ -60,37 +55,10 @@ def download_playlist_spotify(body: DownloadPlaylistSpotifyRequest, db: Session 
         for t in spotify_tracks if t.get("spotify_url")
     }
 
-    existing_job_id = job_service.find_existing_playlist_job(db, playlist.get("id"), playlist["name"])
-
-    if existing_job_id:
-        job_id = existing_job_id
-        tracks, iteration_count = job_service.resume_or_retry_playlist_job(db, job_id, playlist.get("id"), urls, meta_by_url)
-    else:
-        job_id, tracks = job_service.create_job(db, "playlist-urls", playlist["name"], urls, playlist_id=playlist.get("id"), meta_by_url=meta_by_url)
-        iteration_count = 0
+    job_id, tracks, iteration_count = job_service.submit_job(
+        db, "playlist-urls", playlist["name"], urls, external_id=playlist.get("id"), meta_by_url=meta_by_url,
+    )
 
     downloader_service.enqueue_job(job_id, tracks, iteration_count=iteration_count)
 
-    return DownloadPlaylistSpotifyResponse(
-        job_id=job_id,
-        type="playlist-urls",
-        playlist_name=playlist["name"],
-        total=len(urls),
-    )
-
-@router.post("/{job_id}/retry", response_model=RetryResponse, status_code=202)
-def retry(job_id: str, db: Session = Depends(get_db)):
-    
-    job = job_service.get_job(db, job_id)
-
-    if not job:
-        raise HTTPException(404, f"No existe el job {job_id}")
-
-    iteration_count, candidates = job_service.retry(db, job_id)
-
-    if iteration_count is None:
-        return RetryResponse(job_id=job_id, requeued=0)
-
-    downloader_service.enqueue_job(job_id, candidates, iteration_count=iteration_count)
-
-    return RetryResponse(job_id=job_id, iteration_count=iteration_count, requeued=len(candidates))
+    return job_service.get_status(db, job_id)
