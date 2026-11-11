@@ -121,6 +121,8 @@ Archivo `app/config/settings.py`
 - `FORMAT/BITRATE` *(Default: mp3/192k)* — formato y calidad del audio final. 
 - `MAX_RETRIES_PER_TRACK` *(Default: 3)* — cuántas rondas de reintento se permiten por track. 
 - `ETA_WINDOW` *(Default: 20)* — cuántos tracks recientes se promedian para estimar el tiempo restante.
+- `STALL_TIMEOUT_S` *(Default: 60)* — segundos sin avance tras los que se corta una conversión. Reemplaza al límite fijo de 180 s por canción.
+- `LONG_AUDIO_S` *(Default: 900)* — por encima de esta duración no se intenta notube.
 - `TOP_N/CLIENT_CHAIN_LEN` *(Default: 5/5)* — alimentan cuántos intentos máximos recibe un track (`TOP_N` × `CLIENT_CHAIN_LEN` para Spotify, `CLIENT_CHAIN_LEN` + 1 para YouTube directo).
 
 Archivo `musictools/download/core.py`
@@ -205,6 +207,22 @@ El audio descargado, el archivo de cookies y la base SQLite se montan como volú
 
 
 
+
+### Desarrollo con Docker (sin reconstruir por cada cambio)
+
+`docker-compose.override.yml` se carga solo con `docker compose up`: monta `app/`, `musictools/` y `scripts/` desde
+la carpeta y corre uvicorn con `--reload`, así que **un cambio de código se aplica al guardar, sin `build`**.
+Solo hace falta reconstruir cuando cambian las dependencias (`requirements.txt`, `pyproject.toml`) o el `Dockerfile`:
+
+```bash
+docker compose up -d                       # desarrollo: código montado y recarga automática
+docker compose up -d --build               # después de cambiar dependencias o el Dockerfile
+docker compose -f docker-compose.yml up -d # sin el override: el código de la imagen, como en producción
+```
+
+En el `Dockerfile`, las capas van de lo que menos cambia a lo que más cambia (sistema → dependencias → Chromium de
+Playwright → `musictools` → `app`), así que un `build` por cambio de código no vuelve a instalar Chromium.
+
 ## Referencia de la API
 
 
@@ -224,6 +242,55 @@ El audio descargado, el archivo de cookies y la base SQLite se montan como volú
 
 
 
+
+### Flujo de la web (`/jobs`)
+
+Lo usa [`async-music-fetch-engine-web`](../async-music-fetch-engine-web). Separa la descarga en dos tiempos: primero
+se **resuelve** cada canción (metadatos y candidatos puntuados, sin bajar audio) y el usuario revisa la vista previa;
+después se descarga solo lo que confirmó, con el % de cada fase y la opción de cancelar. Sin límite de canciones por
+trabajo ni de duración por canción: una descarga se corta solo si se estanca.
+
+| Método | Ruta | Descripción |
+| --- | --- | --- |
+| `POST` | `/jobs` | Crea el trabajo en vista previa. Body: `{origen: "enlaces" \| "spotify" \| "youtube", urls?, playlists?, entrada?, carpeta?, tracklist?: {cortar, guardar_completo}}`. Con `"enlaces"` (la lista de la web), `urls` mezcla canciones y playlists de Spotify, videos de YouTube y de TikTok, y `playlists` lleva nombres de playlists de Spotify; el trabajo queda con origen `mixto` si hay más de uno |
+| `GET` | `/folders` (`?q=`) | Carpetas de descarga con su nombre visible y cantidad de canciones, y la carpeta por defecto |
+| `POST` | `/folders` | Crea una carpeta. Body: `{nombre}`. 409 si ya existe |
+| `GET` | `/jobs` · `/jobs/{id}` | Trabajos confirmados y su resumen (contadores, tiempo restante) |
+| `GET` | `/jobs/{id}/preview` | Canciones con el mejor candidato y su score (Spotify) o duración y capítulos (YouTube) |
+| `PATCH` | `/jobs/{id}/tracks/{track_id}` | `{accion: "mantener" \| "quitar" \| "cambiar_url" \| "tracklist", url?, cortar?, guardar_completo?}` |
+| `POST` | `/jobs/{id}/confirm` | Encola las canciones aceptadas. Se baja exactamente el candidato revisado, sin volver a buscar |
+| `GET` | `/jobs/{id}/tracks` · `/jobs/{id}/tracks/{track_id}` | Estado, intentos y `progreso` en vivo: `{fase: descargando \| convirtiendo \| cortando, porcentaje, …}`. El detalle suma los intentos |
+| `POST` | `/jobs/{id}/tracks/{track_id}/cancel` · `/jobs/{id}/cancel` | Cancela una canción (en espera o en curso) o todo el trabajo |
+| `POST` | `/jobs/{id}/tracks/{track_id}/retry` · `…/requeue` | Reintenta una fallida (gasta un intento) o vuelve a encolar una cancelada |
+| `GET` · `DELETE` · `POST` | `/jobs/dashboard` · `/jobs/{id}` · `/jobs/{id}/tracks/{track_id}/recover` y `/tracks/queue` · `/tracks/rejected` · `/tracks/recent` (`?page&limit&categoria`) · `/tracks/{id}/redownload` | Tablero de Historial (con sesión): contadores y primeras filas de cada bloque; descartar una búsqueda sin confirmar; recuperar una rechazada; la cola con `posicion`; recientes paginadas; volver a bajar en la misma carpeta |
+
+**Regla de intentos:** cada ronda de descarga suma 1 a `rondas_usadas`; bajar bien o cambiar la URL lo deja en 0;
+cancelar y las cookies vencidas (`waiting_auth`) no suman. El tope es `MAX_RETRIES_PER_TRACK`.
+
+**Progreso:** el % de descarga sale de los `progress_hooks` de yt-dlp. La conversión a MP3 ya no usa
+`FFmpegExtractAudio`: corre ffmpeg con `-progress`, que informa los segundos convertidos. El progreso vive en memoria;
+no se escribe en la base.
+
+**TikTok:** se baja con yt-dlp como cualquier otro video. Necesita `curl_cffi` (en `requirements.txt`): sin él,
+TikTok rechaza a yt-dlp con «Unexpected response from webpage request».
+
+**Tracklist:** si el video trae capítulos y el usuario marcó «cortar», cada tema se guarda como un MP3 aparte
+(`-c copy`, sin volver a codificar) en una subcarpeta con el nombre del video.
+
+Cada canción baja a una carpeta temporal `.parcial-<track_id>`. Si se cancela o falla, se borra entera; si baja bien,
+el MP3 (y la carpeta de temas) pasa a la carpeta definitiva. Al arrancar, la API vuelve a encolar lo que quedó a
+medias por un reinicio.
+
+### Pruebas
+
+```bash
+cd music-extract
+pip install -r requirements-dev.txt
+python -m pytest tests
+```
+
+Usan una base y una carpeta de descargas temporales (`MUSIC_EXTRACT_DB_PATH`, `MUSIC_DOWNLOADED_ROOT`) y un motor
+falso, así que no tocan `app/db/db_downloads.sqlite` ni necesitan red. La conversión y el corte usan ffmpeg real.
 
 ## Licencia
 

@@ -7,12 +7,14 @@ APP_DIR = Path(__file__).resolve().parent.parent
 MUSIC_EXTRACT_DIR = APP_DIR.parent
 
 DATA_DIR = MUSIC_EXTRACT_DIR / "data"
-MUSIC_DOWNLOADED_ROOT = DATA_DIR / "music-downloaded"
+# MUSIC_DOWNLOADED_ROOT y MUSIC_EXTRACT_DB_PATH se pueden cambiar por variable de entorno
+# (los tests y las pruebas locales usan carpetas temporales para no tocar la base real).
+MUSIC_DOWNLOADED_ROOT = Path(os.getenv("MUSIC_DOWNLOADED_ROOT", DATA_DIR / "music-downloaded"))
 MUSIC_NORMALIZED_ROOT = DATA_DIR / "music-normalized"
 COOKIES_FILE = DATA_DIR / "cookies" / "cookies-files" / "cookies.txt"
 BLOCKED_CACHE_PATH = DATA_DIR / "blocked_cache.json"
 
-DB_PATH = APP_DIR / "db" / "db_downloads.sqlite"
+DB_PATH = Path(os.getenv("MUSIC_EXTRACT_DB_PATH", APP_DIR / "db" / "db_downloads.sqlite"))
 ALEMBIC_INI_PATH = APP_DIR / "db" / "alembic.ini"
 ALEMBIC_SCRIPT_LOCATION = APP_DIR / "alembic"
 
@@ -21,7 +23,25 @@ TOP_N = 5
 CLIENT_CHAIN_LEN = 5
 MAX_RETRIES_PER_TRACK = 3
 ETA_WINDOW = 20
-TRACK_TIMEOUT_S = 180
+
+# Sin límite de duración: una descarga se corta solo si se estanca. yt-dlp corta la conexión tras
+# `socket_timeout` (15 s) sin datos; ffmpeg se corta si pasa STALL_TIMEOUT_S sin avanzar.
+STALL_TIMEOUT_S = 60
+# Por encima de esta duración se salta notube (su espera de conversión es de 90 s).
+LONG_AUDIO_S = 900
+
+# Sesión de la web: clave para firmar la cookie. Si no se define, se genera una y se guarda en data/.secret_key.
+SECRET_KEY = os.getenv("OWLO_SECRET_KEY")
+SECRET_KEY_FILE = DATA_DIR / ".secret_key"
+SESSION_COOKIE = "owlo_session"
+SESSION_DAYS = 14
+# Almacenamiento por usuario (bytes) y carpeta de las descargas sin cuenta, que se borran a las 24 h.
+USER_QUOTA_BYTES = int(os.getenv("USER_QUOTA_BYTES", 1024 ** 3))
+ANON_DIR_NAME = "_sin-cuenta"
+ANON_RETENTION_HOURS = 24
+
+# Orígenes del front permitidos por CORS, separados por coma.
+WEB_ORIGINS = [o.strip() for o in os.getenv("WEB_ORIGINS", "http://127.0.0.1:5174,http://localhost:5174").split(",") if o.strip()]
 
 FORMAT = "mp3"
 BITRATE = "192k"

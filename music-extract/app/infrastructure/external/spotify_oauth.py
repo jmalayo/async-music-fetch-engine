@@ -1,4 +1,5 @@
 import secrets
+import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -107,3 +108,35 @@ def run_authorization_flow(*, client_id: str, client_secret: str, redirect_uri: 
     code = wait_for_auth_code(port, state)
 
     return exchange_code_for_token(code, client_id=client_id, client_secret=client_secret, redirect_uri=redirect_uri)
+
+
+# --- Flujo para la web: no bloquea la petición -----------------------------------------------------------------
+# La web pide la URL, la abre en otra pestaña y consulta el estado hasta que el callback guarda el token.
+_pending: dict = {}
+_pending_lock = threading.Lock()
+
+
+def start_authorization_flow(*, client_id: str, client_secret: str, redirect_uri: str, port: int, scopes: str, on_token) -> str:
+    """Devuelve la URL de autorización y espera el callback en segundo plano. `on_token(token_data)` guarda el token.
+
+    Si ya hay un flujo esperando (el callback escucha en un solo puerto), devuelve la misma URL.
+    """
+    with _pending_lock:
+        thread = _pending.get("thread")
+        if thread is not None and thread.is_alive():
+            return _pending["url"]
+
+        state = secrets.token_hex(8)
+        url = build_authorize_url(client_id, redirect_uri, scopes, state)
+
+        def wait():
+            try:
+                code = wait_for_auth_code(port, state)
+                on_token(exchange_code_for_token(code, client_id=client_id, client_secret=client_secret, redirect_uri=redirect_uri))
+            except Exception as e:  # noqa: BLE001 — el hilo no puede propagar: se deja registrado
+                print(f"Autorizacion Spotify fallida: {e}", flush=True)
+
+        thread = threading.Thread(target=wait, name="spotify-oauth", daemon=True)
+        _pending.update(thread=thread, url=url)
+        thread.start()
+        return url

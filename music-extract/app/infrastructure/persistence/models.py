@@ -1,9 +1,21 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from infrastructure.persistence.database import Base
+
+class User(Base):
+    """Usuario de la web. No hay registro: las cuentas se crean con scripts/create_user.py."""
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(64), unique=True, nullable=False)
+    password_hash = Column(String(255), nullable=False)
+    quota_bytes = Column(Integer, nullable=False)
+    is_admin = Column(Boolean, default=False, server_default="0", nullable=False)
+    created_at = Column(String, nullable=False)
+
 
 class Job(Base):
     __tablename__ = "jobs"
@@ -15,6 +27,11 @@ class Job(Base):
     amount = Column(Integer, nullable=False)
     status = Column(String(16), nullable=False)
     elapsed_time_s = Column(Float, nullable=True)
+    # Flujo de la web: origen (spotify | youtube) y carpeta de destino elegida por el usuario.
+    origen = Column(String(16), nullable=True)
+    carpeta = Column(String(255), nullable=True)
+    # Dueño del trabajo; None = descarga sin cuenta (archivos temporales, sin biblioteca).
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
 
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat(), onupdate=datetime.now(timezone.utc).isoformat(), nullable=False)
     updated_at = Column(String, default=datetime.now(timezone.utc).isoformat(), onupdate=datetime.now(timezone.utc).isoformat(), nullable=False)
@@ -33,6 +50,27 @@ class Track(Base):
     status = Column(String(16), nullable=False)
     max_attempts = Column(Integer, nullable=False)
     elapsed_s = Column(Float, default=0, nullable=False)
+
+    # Intentos del usuario (rondas). Vuelve a 0 al bajar bien o al cambiar la URL; cancelar no suma.
+    rondas_usadas = Column(Integer, default=0, server_default="0", nullable=False)
+    duration_s = Column(Float, nullable=True)
+    ya_descargada = Column(Boolean, default=False, server_default="0", nullable=False)
+    # Motivo clasificado del último fallo: geo_restricted, premium_only, needs_auth, client_blocked, stalled, no_candidates…
+    motivo = Column(String(32), nullable=True)
+    # Vista previa en JSON: candidatos puntuados, disponibilidad y capítulos del video.
+    preview = Column(Text, nullable=True)
+    # Opciones del tracklist en JSON: {"cortar": bool, "guardar_completo": bool}.
+    tracklist = Column(Text, nullable=True)
+
+    # Biblioteca: archivo descargado (ruta relativa a MUSIC_DOWNLOADED_ROOT; una carpeta si se cortó por tracklist
+    # sin guardar el audio completo), su tamaño, cuántas veces se bajó al equipo, y si bajó después de fallar o con
+    # una URL cambiada (recuperada con la sugerencia).
+    archivo = Column(String(1000), nullable=True)
+    bytes = Column(Integer, nullable=True)
+    descargas = Column(Integer, default=0, server_default="0", nullable=False)
+    recuperada = Column(Boolean, default=False, server_default="0", nullable=False)
+    # Borrada de la biblioteca por el usuario: sus archivos ya no están en disco, pero la fila queda para Recientes.
+    eliminada = Column(Boolean, default=False, server_default="0", nullable=False)
 
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat(), onupdate=datetime.now(timezone.utc).isoformat(), nullable=False)
     updated_at = Column(String, default=datetime.now(timezone.utc).isoformat(), onupdate=datetime.now(timezone.utc).isoformat(), nullable=False)

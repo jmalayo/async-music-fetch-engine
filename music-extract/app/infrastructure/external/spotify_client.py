@@ -12,7 +12,8 @@ from core import job_service
 from infrastructure.external import spotify_oauth
 from infrastructure.persistence.models import SpotifyToken
 
-_PLAYLIST_ID_RE = re.compile(r"(?:open\.spotify\.com/playlist/|spotify:playlist:)([a-zA-Z0-9]+)")
+# Spotify agrega el idioma al compartir (open.spotify.com/intl-es/playlist/…): se acepta con y sin él.
+_PLAYLIST_ID_RE = re.compile(r"(?:open\.spotify\.com/(?:intl-[a-zA-Z-]+/)?playlist/|spotify:playlist:)([a-zA-Z0-9]+)")
 
 def extract_playlist_id(text: str) -> str | None:
     m = _PLAYLIST_ID_RE.search(text)

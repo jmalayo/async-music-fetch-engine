@@ -4,7 +4,7 @@ import yt_dlp
 
 from pathlib import Path
 
-from . import blocked_cache
+from . import audio, blocked_cache, progress
 
 _GEO_KEYWORDS = (
     "not available in your country",
@@ -75,6 +75,8 @@ def _common_opts(cookies_file: Path, js_runtime: str, proxy: str | None = None, 
     opts = {
         "quiet": True,
         "no_warnings": True,
+        # El progreso va al reporter (progress_hooks), no a la consola.
+        "noprogress": True,
         "noplaylist": True,
         "socket_timeout": 15,
         "cookiefile": str(cookies_file),
@@ -101,33 +103,48 @@ def download(
     proxy: str | None = None,
     client: str | None = None,
 ) -> tuple[bool, str, str]:
+    """Baja el mejor audio y lo convierte a `fmt` con ffmpeg propio, para informar el % de las dos fases.
 
+    El progreso y la cancelación salen del reporter del hilo (`progress.current()`), si hay uno.
+    """
+
+    reporter = progress.current()
     opts = _common_opts(cookies_file, js_runtime, proxy, client)
 
     opts.update({
         "format": "ba/b",
         "outtmpl": str(out_dir / "%(uploader)s - %(title)s.%(ext)s"),
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": fmt,
-            "preferredquality": bitrate.rstrip("k"),
-        }],
+        "progress_hooks": [reporter.ytdlp_hook] if reporter else [],
     })
 
     try:
 
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
-
-        title = (info or {}).get("title", url)
-
-        return True, "public", f"Descargado: {title}"
+            downloads = (info or {}).get("requested_downloads") or []
+            src = Path(downloads[0]["filepath"]) if downloads and downloads[0].get("filepath") else Path(ydl.prepare_filename(info))
 
     except yt_dlp.utils.DownloadError as e:
 
+        progress.check_cancelled()
         msg = str(e).strip()
 
         return False, classify_error(msg), msg[-300:]
+
+    progress.check_cancelled()
+    title = (info or {}).get("title", url)
+
+    if src.suffix.lower() != f".{fmt}":
+        try:
+            audio.convert_to_mp3(src, src.with_suffix(f".{fmt}"), bitrate=bitrate, duration_s=(info or {}).get("duration"))
+        except audio.StalledError as e:
+            return False, "stalled", str(e)
+        except audio.FfmpegError as e:
+            return False, "error", f"Conversión fallida: {e}"
+        finally:
+            src.unlink(missing_ok=True)
+
+    return True, "public", f"Descargado: {title}"
 
 def _intento(video_id, client, ok, avail, msg, duracion_s, url):
 
@@ -171,6 +188,7 @@ def download_with_rotation(
         
         return False, "client_blocked", msg, intentos
 
+    progress.check_cancelled()
     t0 = time.monotonic()
 
     ok, avail, msg = download(
@@ -196,6 +214,7 @@ def download_with_rotation(
     ]
 
     for client in chain:
+        progress.check_cancelled()
         t0 = time.monotonic()
         ok, avail, msg = download(
             url,
@@ -241,6 +260,47 @@ def search_flat(
         return []
 
     return info.get("entries") or [] if info else []
+
+def probe_info(
+    url: str,
+    *,
+    cookies_file: Path,
+    js_runtime: str,
+    proxy: str | None = None,
+) -> tuple[dict | None, str | None]:
+    """Metadatos de un video sin descargarlo: título, canal, duración y capítulos (el tracklist).
+
+    Devuelve (info, None) o (None, motivo) con el motivo clasificado como en `classify_error`.
+    """
+
+    opts = _common_opts(cookies_file, js_runtime, proxy)
+    opts["skip_download"] = True
+
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+    except yt_dlp.utils.DownloadError as e:
+        return None, classify_error(str(e))
+
+    if not info:
+        return None, "error"
+
+    chapters = [
+        {"inicio_s": round(c.get("start_time") or 0, 3), "fin_s": round(c["end_time"], 3) if c.get("end_time") is not None else None, "titulo": c.get("title") or ""}
+        for c in (info.get("chapters") or [])
+    ]
+
+    return {
+        "id": info.get("id"),
+        "title": info.get("title") or "",
+        "channel": info.get("channel") or info.get("uploader") or "",
+        "duration": info.get("duration"),
+        "url": info.get("webpage_url") or url,
+        "chapters": chapters,
+        # Imagen del video (miniatura de YouTube, portada de TikTok) para la vista previa.
+        "thumbnail": info.get("thumbnail"),
+    }, None
 
 def probe_title(
     url: str,

@@ -58,3 +58,6 @@ music-extract/app/db/*
 .DS_Store
 Thumbs.db
 .vscode/
+
+# ── Secretos generados en local 
+music-extract/data/.secret_key

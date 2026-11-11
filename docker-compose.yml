@@ -3,12 +3,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: music-extract-api
     ports:
-      - "8000:8000"
+      - "1011:8000"
       - "127.0.0.1:8888:8888"
     env_file:
       - music-extract/.env
     volumes:
       - ./music-extract/data:/app/music-extract/data
       - ./music-extract/app/db:/app/music-extract/app/db
-    restart: unless-stopped
+    restart: "no"

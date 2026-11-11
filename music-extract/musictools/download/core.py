@@ -1,4 +1,5 @@
 import logging
+import re
 import shutil
 import sys
 import tempfile
@@ -11,10 +12,11 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
 
-from .candidate_scoring import rank
+from . import progress
+from .candidate_scoring import rank, score as score_candidate
 from .notube import download_from_notube
 from .spotify_metadata import get_track_metadata
-from .ytdlp_lib import download_with_rotation, probe_title, search_flat
+from .ytdlp_lib import download_with_rotation, probe_info, search_flat
 from .ytmusic_search import search as ytmusic_search
 
 logging.basicConfig(level=logging.INFO)
@@ -23,6 +25,9 @@ logger = logging.getLogger(__name__)
 _PRIVATE = {"premium_only", "needs_auth"}
 
 MIN_SCORE = 60
+
+# notube espera como máximo 90 s a que el sitio convierta: en audios más largos que esto no se intenta.
+LONG_AUDIO_S = 900
 
 @dataclass
 class SpotifyCredentials:
@@ -148,12 +153,14 @@ def download_youtube_url(
     proxy: str | None = None,
 ):
 
-    title = probe_title(
+    info, _ = probe_info(
         url,
         cookies_file=cookies_file,
         js_runtime=js_runtime,
         proxy=proxy
     )
+    title = (info or {}).get("title")
+    duration = (info or {}).get("duration") or 0
 
     ok, avail, msg, intentos = attempt_download(
         url, 
@@ -175,24 +182,34 @@ def download_youtube_url(
     if avail == "client_blocked":
         return False, f"[SKIP] client_blocked (content-ID, cadena de clientes agotada) — {msg}", intentos, title
 
+    if avail == "stalled":
+        return False, f"[SKIP] stalled — {msg}", intentos, title
+
+    if duration > LONG_AUDIO_S:
+        return False, f"[FATAL] {msg} (audio de {duration / 60:.0f} min: se omite notube)", intentos, title
+
     if avail == "geo_restricted":
         logger.info("[GEO] -> notube")
 
+        progress.check_cancelled()
         t0 = time.monotonic()
         ok2, msg2 = download_from_notube(url, out_dir)
         intentos.append(
             _intento_notube(url, ok2, msg2, time.monotonic() - t0)
         )
+        progress.check_cancelled()
 
         return ok2, msg2, intentos, title
 
     logger.info("[yt-dlp fallo] -> notube fallback")
 
+    progress.check_cancelled()
     t0 = time.monotonic()
     ok2, msg2 = download_from_notube(url, out_dir)
     intentos.append(
         _intento_notube(url, ok2, msg2, time.monotonic() - t0)
     )
+    progress.check_cancelled()
 
     if not ok2:
         msg2 = f"[FATAL] {msg}"
@@ -214,7 +231,10 @@ def download_spotify_url(
     candidates_max: int = 15,
     top_n: int = 5,
     known_meta: dict | None = None,
+    candidates: list[dict] | None = None,
 ):
+    """Descarga el primer candidato que funcione. Si `candidates` viene (los de la vista previa, ya
+    puntuados), no se vuelve a buscar: se baja exactamente lo que el usuario revisó."""
 
     meta = known_meta or get_track_metadata(url, client_id=spotify_creds.client_id, client_secret=spotify_creds.client_secret)
     artist = meta["artists"][0] if meta["artists"] else ""
@@ -222,24 +242,28 @@ def download_spotify_url(
 
     query = f"{artist} {title}".strip()
 
-    candidates = gather_candidates(
-        query, 
-        cookies_file=cookies_file, 
-        js_runtime=js_runtime, 
-        proxy=proxy,
-        candidates_per_source=candidates_per_source,
-        candidates_max=candidates_max
-    )
+    if candidates:
+        top = candidates
+    else:
+        found = gather_candidates(
+            query,
+            cookies_file=cookies_file,
+            js_runtime=js_runtime,
+            proxy=proxy,
+            candidates_per_source=candidates_per_source,
+            candidates_max=candidates_max
+        )
 
-    if not candidates:
-        return False, f"[FATAL] Sin candidatos de YouTube para «{query}»", [], title, artist
+        if not found:
+            return "failed", f"[FATAL] Sin candidatos de YouTube para «{query}»", [], title, artist
 
-    top = rank(candidates, artist, title, meta["duration_s"], top_n=top_n)
+        top = rank(found, artist, title, meta["duration_s"], top_n=top_n)
 
     intentos = []
     last_msg = ""
 
     for c in top:
+        progress.check_cancelled()
         score = c.get("score") or 0
 
         ok, avail, msg, sub_intentos = attempt_download(
@@ -267,9 +291,10 @@ def download_spotify_url(
 
             return "incorrect", f"[{c.get('source', '?')}] {c['title']} (score {score:.1f} < {MIN_SCORE})", intentos, title, artist
 
-        if avail == "geo_restricted":
+        if avail == "geo_restricted" and (c.get("duration") or 0) <= LONG_AUDIO_S:
             t0 = time.monotonic()
             ok2, msg2 = download_from_notube(c["url"], out_dir)
+            progress.check_cancelled()
 
             it = _intento_notube(c["url"], ok2, msg2, time.monotonic() - t0)
             it["candidato_titulo"] = c.get("title")
@@ -304,6 +329,7 @@ def download(
     candidates_max: int = 15,
     top_n: int = 5,
     known_meta: dict | None = None,
+    candidates: list[dict] | None = None,
 ) -> dict:
 
     js_runtime = js_runtime or default_js_runtime()
@@ -349,7 +375,8 @@ def download(
                     candidates_per_source=candidates_per_source,
                     candidates_max=candidates_max, 
                     top_n=top_n, 
-                    known_meta=known_meta
+                    known_meta=known_meta,
+                    candidates=candidates,
                 )
 
             except Exception as e:
@@ -426,3 +453,177 @@ def download(
             "artista": None
         }
     
+
+def _youtube_thumbnail(video_id: str | None) -> str | None:
+    """Miniatura de un video de YouTube a partir de su id (11 caracteres), sin pedir nada a YouTube."""
+    return f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg" if video_id and len(video_id) == 11 else None
+
+
+def _public_candidate(c: dict) -> dict:
+    return {
+        "thumbnail": c.get("thumbnail") or _youtube_thumbnail(c.get("id")),
+        "id": c.get("id"),
+        "title": c.get("title") or "",
+        "channel": c.get("channel") or "",
+        "duration": c.get("duration"),
+        "url": c.get("url"),
+        "source": c.get("source"),
+        "score": round(c["score"], 1) if c.get("score") is not None else None,
+    }
+
+
+def resolve(
+    url: str,
+    *,
+    cookies_file: Path,
+    js_runtime: str | None = None,
+    spotify_creds: SpotifyCredentials | None = None,
+    proxy: str | None = None,
+    candidates_per_source: int = 10,
+    candidates_max: int = 15,
+    top_n: int = 5,
+    known_meta: dict | None = None,
+) -> dict:
+    """Vista previa de una canción: qué es y qué se bajaría, sin descargar audio.
+
+    Spotify → metadatos + los `top_n` candidatos de YouTube puntuados (`candidatos[0]` es el mejor).
+    YouTube → título, canal, duración, disponibilidad y capítulos (el tracklist).
+    """
+
+    js_runtime = js_runtime or default_js_runtime()
+
+    with _private_cookies_copy(cookies_file) as private_cookies:
+
+        if is_spotify(url):
+            if spotify_creds is None:
+                raise RuntimeError("se requieren spotify_creds para URLs de Spotify")
+
+            meta = known_meta or get_track_metadata(url, client_id=spotify_creds.client_id, client_secret=spotify_creds.client_secret)
+            artist = meta["artists"][0] if meta["artists"] else ""
+            title = meta["name"]
+            found = gather_candidates(
+                f"{artist} {title}".strip(),
+                cookies_file=private_cookies,
+                js_runtime=js_runtime,
+                proxy=proxy,
+                candidates_per_source=candidates_per_source,
+                candidates_max=candidates_max,
+            )
+            top = [_public_candidate(c) for c in rank(found, artist, title, meta["duration_s"], top_n=top_n)] if found else []
+
+            return {
+                "origen": "spotify",
+                "title": title,
+                "artist": artist,
+                "duration_s": meta["duration_s"],
+                "candidatos": top,
+                "disponible": bool(top),
+                "motivo": None if top else "no_candidates",
+                "chapters": [],
+            }
+
+        info, motivo = probe_info(url, cookies_file=private_cookies, js_runtime=js_runtime, proxy=proxy)
+
+        if info is None:
+            return {"origen": "youtube", "title": None, "artist": None, "duration_s": None, "candidatos": [],
+                    "disponible": False, "motivo": motivo, "chapters": []}
+
+        return {
+            "origen": "youtube",
+            "title": info["title"],
+            "artist": info["channel"],
+            "duration_s": info["duration"],
+            "candidatos": [],
+            "disponible": True,
+            "motivo": None,
+            "chapters": info["chapters"],
+            "thumbnail": info.get("thumbnail") or _youtube_thumbnail(info.get("id")),
+        }
+
+
+def score_url_for(
+    url: str,
+    *,
+    artist: str,
+    title: str,
+    duration_s: float | None,
+    cookies_file: Path,
+    js_runtime: str | None = None,
+    proxy: str | None = None,
+) -> dict | None:
+    """Puntúa una URL de YouTube que pegó el usuario contra los metadatos de la canción («Cambiar URL»)."""
+
+    js_runtime = js_runtime or default_js_runtime()
+
+    with _private_cookies_copy(cookies_file) as private_cookies:
+        info, _ = probe_info(url, cookies_file=private_cookies, js_runtime=js_runtime, proxy=proxy)
+
+    if info is None:
+        return None
+
+    candidate = {**info, "source": "usuario"}
+    candidate["score"] = score_candidate(candidate, artist or "", title or "", duration_s or (info.get("duration") or 0))
+
+    return _public_candidate(candidate)
+
+
+# --- Temas de un tracklist como canciones completas ---------------------------------------------------------------
+
+_TEMA_PREFIX = re.compile(r"^\s*(?:\(?\d{1,3}[.):\-]\)?\s+|\d{1,2}:\d{2}(?::\d{2})?\s*[-–—]?\s*)")
+_TEMA_SEP = re.compile(r"\s+[-–—]\s+")
+
+
+def split_tema_title(text: str) -> tuple[str, str]:
+    """«01. Artista - Canción» → ("Artista", "Canción"). Sin separador, el artista queda vacío."""
+    clean = _TEMA_PREFIX.sub("", text or "").strip()
+    parts = _TEMA_SEP.split(clean, maxsplit=1)
+    return (parts[0].strip(), parts[1].strip()) if len(parts) == 2 else ("", clean)
+
+
+def search_song(
+    artist: str,
+    title: str,
+    duration_s: float | None,
+    *,
+    cookies_file: Path,
+    js_runtime: str | None = None,
+    proxy: str | None = None,
+    top_n: int = 5,
+) -> list[dict]:
+    """Busca una canción en YouTube (como con Spotify) y devuelve los `top_n` candidatos puntuados."""
+    js_runtime = js_runtime or default_js_runtime()
+    with _private_cookies_copy(cookies_file) as private_cookies:
+        found = gather_candidates(f"{artist} {title}".strip(), cookies_file=private_cookies, js_runtime=js_runtime, proxy=proxy)
+    return [_public_candidate(c) for c in rank(found, artist, title, duration_s or 0, top_n=top_n)] if found else []
+
+
+def download_song(
+    *,
+    artist: str,
+    title: str,
+    duration_s: float | None,
+    candidates: list[dict],
+    out_dir: Path,
+    cookies_file: Path,
+    cache_path: Path,
+    js_runtime: str | None = None,
+    fmt: str = "mp3",
+    bitrate: str = "192k",
+    proxy: str | None = None,
+) -> dict:
+    """Baja el primer candidato que funcione de una canción ya buscada (los de la vista previa)."""
+    js_runtime = js_runtime or default_js_runtime()
+    meta = {"name": title, "artists": [artist] if artist else [], "duration_s": duration_s or 0}
+    with _private_cookies_copy(cookies_file) as private_cookies:
+        try:
+            estado, msg, intentos, _, _ = download_spotify_url(
+                "", out_dir=out_dir, cookies_file=private_cookies, cache_path=cache_path, js_runtime=js_runtime,
+                fmt=fmt, bitrate=bitrate, spotify_creds=None, proxy=proxy, known_meta=meta, candidates=candidates,
+            )
+        except progress.TrackCancelled:
+            raise
+        except Exception as e:  # noqa: BLE001
+            estado, msg, intentos = "failed", f"[FATAL] {e}", []
+    # El video que se bajó de verdad (puede no ser el primer candidato, si ese falló).
+    ok = next((it for it in reversed(intentos) if it.get("resultado") == "correcta" and it.get("candidato_url")), None)
+    return {"estado": estado, "mensaje": msg, "intentos": intentos, "url": ok["candidato_url"] if ok else None}

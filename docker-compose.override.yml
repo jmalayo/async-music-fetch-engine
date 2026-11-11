@@ -1,0 +1,29 @@
+# Desarrollo local: `docker compose up` carga este archivo solo, encima de docker-compose.yml.
+# El código se monta desde la carpeta (en vez de usar la copia de la imagen) y uvicorn se reinicia solo al
+# guardar un cambio, así que el código ya no obliga a reconstruir la imagen: solo hace falta `docker compose build`
+# cuando cambian las dependencias (requirements.txt, pyproject.toml) o el Dockerfile.
+#
+# Para correr sin este archivo (como en producción): docker compose -f docker-compose.yml up -d
+services:
+  api:
+    volumes:
+      - ./music-extract/app:/app/music-extract/app
+      - ./music-extract/musictools:/app/music-extract/musictools
+      - ./music-extract/scripts:/app/music-extract/scripts
+    environment:
+      # Sin archivos __pycache__ del contenedor (que serían de root) en la carpeta del proyecto.
+      PYTHONDONTWRITEBYTECODE: "1"
+    # Al reiniciarse por un cambio, las descargas en curso vuelven a la cola sin gastar intento
+    # (resume_after_restart en main.py).
+    command:
+      - uvicorn
+      - main:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /app/music-extract/app
+      - --reload-dir
+      - /app/music-extract/musictools

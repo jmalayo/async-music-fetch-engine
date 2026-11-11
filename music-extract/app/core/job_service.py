@@ -252,18 +252,26 @@ def mark_in_progress(db: Session, track_id: int) -> None:
         track.updated_at = _now()
         db.commit()
 
+ACTIVE_STATUSES = ["pending", "in_progress", "cancelling"]
+
 def _update_job_status(db: Session, job_id: str) -> None:
-    pending_count = db.query(Track).filter(Track.job_id == job_id, Track.status.in_(["pending", "in_progress"])).count()
+    job = db.get(Job, job_id)
+
+    # La vista previa todavía no empezó a descargar: su estado lo maneja web_jobs.
+    if job.status in ("resolving", "preview"):
+        return
+
+    pending_count = db.query(Track).filter(Track.job_id == job_id, Track.status.in_(ACTIVE_STATUSES)).count()
 
     if pending_count > 0:
         return
 
-    failed_count = db.query(Track).filter(Track.job_id == job_id, Track.status.in_(["failed", "incorrect", "skipped"])).count()
+    failed_count = db.query(Track).filter(Track.job_id == job_id, Track.status.in_(["failed", "incorrect", "skipped", "waiting_auth"])).count()
 
-    job = db.get(Job, job_id)
     now = datetime.now(timezone.utc)
 
-    job.status = "completed_with_errors" if failed_count > 0 else "completed"
+    if job.status != "cancelled":
+        job.status = "completed_with_errors" if failed_count > 0 else "completed"
     job.updated_at = now.isoformat()
     job.elapsed_time_s = round((now - datetime.fromisoformat(job.created_at)).total_seconds(), 1)
 
@@ -306,7 +314,9 @@ def _rounds_involved(db: Session, job_id: str, track: Track) -> int:
 
     return rounds
 
-def record_result(db: Session, track_id: int, iteration_count: int, status: str, attempts: list[dict], title: str | None, artist: str | None, elapsed_s: float) -> None:
+def record_result(db: Session, track_id: int, iteration_count: int, status: str, attempts: list[dict], title: str | None, artist: str | None, elapsed_s: float, before_commit=None) -> None:
+    """Guarda el resultado de una descarga. `before_commit(track)` permite ajustar la canción en la
+    misma transacción (lo usa web_jobs para la regla de intentos)."""
     now = _now()
 
     with _lock:
@@ -359,6 +369,9 @@ def record_result(db: Session, track_id: int, iteration_count: int, status: str,
             requeued = _count_requeued(db, track.job_id, iteration_count)
             if retry_row.fixed_count + retry_row.failed_count >= requeued and not retry_row.completed_at:
                 retry_row.completed_at = now
+
+        if before_commit is not None:
+            before_commit(track)
 
         _update_job_status(db, track.job_id)
         db.commit()
@@ -519,7 +532,8 @@ def retry(db: Session, job_id: str) -> tuple[int | None, list[tuple[int, str, di
     with _lock:
         failed_tracks = db.query(Track).filter(Track.job_id == job_id, Track.status.in_(["failed", "skipped"])).all()
 
-        candidates = [t for t in failed_tracks if _rounds_involved(db, job_id, t) < MAX_RETRIES_PER_TRACK]
+        # Solo cuentan los intentos de una canción que nunca bajó: `rondas_usadas` vuelve a 0 al bajar bien.
+        candidates = [t for t in failed_tracks if (t.rondas_usadas or 0) < MAX_RETRIES_PER_TRACK]
 
         if not candidates:
             return None, []

@@ -1,4 +1,6 @@
 yt-dlp>=2024.1.0
+# TikTok bloquea a yt-dlp si no se hace pasar por un navegador real (impersonation).
+curl_cffi>=0.7
 rapidfuzz>=3.0.0
 ytmusicapi>=1.7.0
 python-dotenv>=1.0.0
