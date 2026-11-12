@@ -372,9 +372,10 @@ def _mejor(preview: dict) -> dict | None:
 
 
 def _tema_video(chapter: dict) -> dict | None:
-    """El video que se encontró para un tema (el mejor candidato con score suficiente); sin él, se corta del set."""
+    """El video que se encontró para un tema (el mejor candidato con score suficiente, o el que eligió el usuario);
+    sin él, se corta del set."""
     best = next(iter(chapter.get("candidatos") or []), None)
-    if not best or (best.get("score") or 0) < MIN_TEMA_SCORE:
+    if not best or (not chapter.get("elegido") and (best.get("score") or 0) < MIN_TEMA_SCORE):
         return None
     return {k: best.get(k) for k in ("url", "title", "channel", "thumbnail", "score", "duration")}
 
@@ -412,6 +413,15 @@ def _tracklist_payload(track: Track, tracklist: dict | None, chapters: list[dict
             # Encontrado en YouTube como canción completa (None: se corta del set).
             "video": _tema_video(c),
             "buscado": "candidatos" in c,
+            # El mejor score encontrado aunque no alcance (la sublista lo muestra como dudoso).
+            "mejor_score": (next(iter(c.get("candidatos") or []), {}) or {}).get("score"),
+            "elegido": bool(c.get("elegido")),
+            "buscando": bool(c.get("buscando")),
+            # Tras «Volver a buscar» este tema: otras coincidencias para reemplazar (✓ / ✕).
+            "sugerencias": [
+                {k: x.get(k) for k in ("url", "title", "channel", "duration", "thumbnail", "score", "source")}
+                for x in c.get("sugerencias") or []
+            ] if track.status in ("preview", "rechazada") else [],
             # Ya está en la carpeta (de otra descarga): no se vuelve a bajar.
             "ya_descargado": i in ya,
             # En la biblioteca: si este tema se guardó y de dónde salió («video» o «corte»).
@@ -653,6 +663,99 @@ def research_track(db: Session, job_id: str, track_id: int) -> tuple[Track, dict
         return track, known_meta
 
 
+def _tema_duration(track: Track, chapters: list[dict], index: int) -> float | None:
+    chapter = chapters[index]
+    fin = chapter.get("fin_s")
+    if fin is None:
+        fin = chapters[index + 1].get("inicio_s") if index + 1 < len(chapters) else track.duration_s
+    return (fin - (chapter.get("inicio_s") or 0)) if fin else None
+
+
+def research_tema(db: Session, job_id: str, track_id: int, index: int) -> dict:
+    """Vuelve a buscar un solo tema del tracklist (como «Volver a buscar» una canción). La canción queda «buscando»
+    mientras tanto; el tema elegido sigue elegido y lo nuevo se ofrece como sugerencia. Devuelve qué buscar."""
+    with _lock:
+        job = _get_job(db, job_id)
+        if job.status not in ("resolving", "preview"):
+            raise Conflict("El tema ya no se puede volver a buscar: el trabajo ya se confirmó.")
+        track = _get_track(db, job_id, track_id)
+        if track.ya_descargada or track.status not in ("preview", "rechazada"):
+            raise Conflict("Este tema no se puede volver a buscar ahora.")
+        preview = _loads(track.preview, {})
+        chapters = preview.get("chapters") or []
+        if not 0 <= index < len(chapters):
+            raise NotFound("No existe ese tema.")
+        chapter = chapters[index]
+        video = _tema_video(chapter)
+        chapter["elegido_antes"] = chapter["candidatos"][0] if video else None
+        chapter["buscando"] = True
+        chapter.pop("sugerencias", None)
+        preview["estado_antes_tema"] = track.status
+        track.preview = json.dumps(preview)
+        track.status = "resolving"
+        track.updated_at = _now()
+        db.commit()
+        refresh_preview_status(db, job_id)
+        return {"artista": chapter.get("artista") or "", "cancion": chapter.get("cancion") or chapter.get("titulo") or "",
+                "duracion": _tema_duration(track, chapters, index)}
+
+
+def save_tema_research(db: Session, track_id: int, index: int, found: list[dict]) -> None:
+    """Guarda la búsqueda nueva de un tema y devuelve la canción a la vista previa."""
+    with _lock:
+        track = db.get(Track, track_id)
+        if track is None:
+            return
+        preview = _loads(track.preview, {})
+        chapters = preview.get("chapters") or []
+        if 0 <= index < len(chapters):
+            chapter = chapters[index]
+            before = chapter.pop("elegido_antes", None)
+            chapter.pop("buscando", None)
+            if before:
+                others = [c for c in found if c.get("url") != before.get("url")]
+                chapter["candidatos"] = [before] + others
+                chapter["sugerencias"] = others[:3]
+            else:
+                chapter["candidatos"] = found
+                chapter.pop("elegido", None)
+                good = bool(found) and (found[0].get("score") or 0) >= MIN_TEMA_SCORE
+                # Si nada alcanza, las mejores se ofrecen igual para que el usuario elija.
+                chapter["sugerencias"] = found[1:4] if good else found[:3]
+        track.status = preview.pop("estado_antes_tema", None) or "preview"
+        track.preview = json.dumps(preview)
+        track.updated_at = _now()
+        db.commit()
+        refresh_preview_status(db, track.job_id)
+
+
+def choose_tema_suggestion(db: Session, job_id: str, track_id: int, index: int, url: str | None, accept: bool) -> Track:
+    """Sugerencia de un tema: aceptarla la pone como su video (aunque su score sea bajo); rechazarla la quita."""
+    with _lock:
+        track = _get_track(db, job_id, track_id)
+        if track.status not in ("preview", "rechazada"):
+            raise Conflict("Este tema ya no se puede cambiar.")
+        preview = _loads(track.preview, {})
+        chapters = preview.get("chapters") or []
+        if not 0 <= index < len(chapters):
+            raise NotFound("No existe ese tema.")
+        chapter = chapters[index]
+        sugerencias = chapter.get("sugerencias") or []
+        chosen = next((c for c in sugerencias if c.get("url") == url), None)
+        if chosen is None:
+            raise NotFound("Esa sugerencia ya no está.")
+        if accept:
+            chapter["candidatos"] = [chosen] + [c for c in chapter.get("candidatos") or [] if c.get("url") != url]
+            chapter["elegido"] = True
+            chapter["sugerencias"] = []
+        else:
+            chapter["sugerencias"] = [c for c in sugerencias if c.get("url") != url]
+        track.preview = json.dumps(preview)
+        track.updated_at = _now()
+        db.commit()
+        return track
+
+
 def choose_suggestion(db: Session, job_id: str, track_id: int, url: str | None, accept: bool) -> Track:
     """Sugerencia de reemplazo (tras «Volver a buscar»): aceptarla la pone como el video elegido (y se descartan las
     demás); rechazarla la quita de las sugerencias."""
@@ -852,9 +955,19 @@ def _plan_temas(db: Session, track: Track, chapters: list[dict], tracklist: dict
             "cancion": chapter.get("cancion") or chapter.get("titulo") or "",
             "inicio_s": chapter.get("inicio_s") or 0,
             "fin_s": chapter.get("fin_s"),
-            "candidatos": [c for c in chapter.get("candidatos") or [] if (c.get("score") or 0) >= MIN_TEMA_SCORE],
+            "candidatos": _tema_candidates(chapter),
         })
     return plan
+
+
+def _tema_candidates(chapter: dict) -> list[dict]:
+    """Los candidatos que se intentan al bajar un tema: los de score suficiente, y primero el que eligió el usuario
+    (aunque su score sea bajo)."""
+    candidatos = chapter.get("candidatos") or []
+    good = [c for c in candidatos if (c.get("score") or 0) >= MIN_TEMA_SCORE]
+    if chapter.get("elegido") and candidatos:
+        return [candidatos[0]] + [c for c in good if c.get("url") != candidatos[0].get("url")]
+    return good
 
 
 def wants_temas(db: Session, track_id: int) -> bool:

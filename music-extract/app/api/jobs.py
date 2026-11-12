@@ -48,6 +48,8 @@ class CreateJobRequest(BaseModel):
 class UpdateTrackRequest(BaseModel):
     accion: Literal["mantener", "quitar", "cambiar_url", "tracklist", "aceptar_sugerencia", "rechazar_sugerencia"]
     url: str | None = None
+    # Con aceptar/rechazar sugerencia: la sugerencia es de este tema del tracklist (no de la canción).
+    tema: int | None = None
     cortar: bool | None = None
     guardar_completo: bool | None = None
     # Índices de los temas del tracklist que no se cortan (la sublista de la vista previa).
@@ -336,6 +338,8 @@ def update_track(job_id: str, track_id: int, body: UpdateTrackRequest, db: Sessi
         web_jobs.check_owner(db, job_id, user)
         if body.accion in ("mantener", "quitar"):
             track = web_jobs.set_included(db, job_id, track_id, body.accion == "mantener")
+        elif body.accion in ("aceptar_sugerencia", "rechazar_sugerencia") and body.tema is not None:
+            track = web_jobs.choose_tema_suggestion(db, job_id, track_id, body.tema, body.url, body.accion == "aceptar_sugerencia")
         elif body.accion in ("aceptar_sugerencia", "rechazar_sugerencia"):
             track = web_jobs.choose_suggestion(db, job_id, track_id, body.url, body.accion == "aceptar_sugerencia")
         elif body.accion == "tracklist":
@@ -366,6 +370,20 @@ def research_track(job_id: str, track_id: int, db: Session = Depends(get_db), us
         track, known_meta = web_jobs.research_track(db, job_id, track_id)
         # Ignora la búsqueda guardada: busca de nuevo y la reemplaza.
         downloader_service.enqueue_resolve([(track.track_id, track.url, known_meta)], force=True)
+        db.refresh(track)
+        return web_jobs.track_payload(track)
+
+    return _handle(run)
+
+
+@router.post("/{job_id}/tracks/{track_id}/temas/{tema}/research")
+def research_tema(job_id: str, track_id: int, tema: int, db: Session = Depends(get_db), user: User | None = Depends(auth.current_user)):
+    """Vuelve a buscar un solo tema del tracklist en la vista previa; trae otras coincidencias para elegir."""
+    def run():
+        web_jobs.check_owner(db, job_id, user)
+        meta = web_jobs.research_tema(db, job_id, track_id, tema)
+        downloader_service.enqueue_research_tema(track_id, tema, meta)
+        track = web_jobs._get_track(db, job_id, track_id)
         db.refresh(track)
         return web_jobs.track_payload(track)
 

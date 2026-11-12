@@ -176,6 +176,30 @@ def _search_temas(chapters: list[dict], total_s: float | None) -> list[dict]:
         return list(pool.map(lambda pair: one(*pair), enumerate(chapters)))
 
 
+def _research_tema(track_id: int, index: int, meta: dict) -> None:
+    """Busca otra vez un tema con varias frases (como «Volver a buscar» una canción de Spotify) y guarda los mejores."""
+    found: dict[str, dict] = {}
+    try:
+        with SessionLocal() as db:
+            track = db.get(Track, track_id)
+            with_account = bool(track and track.job and track.job.user_id is not None)
+        with ytdlp_lib.browser_cookies_allowed(with_account):
+            for query in query_variants(meta["artista"], meta["cancion"])[:4]:
+                for c in search_song(meta["artista"], meta["cancion"], meta["duracion"], cookies_file=COOKIES_FILE,
+                                     js_runtime=_js_runtime, proxy=PROXY, top_n=8, query=query, tema=True):
+                    if c["url"] not in found or (c.get("score") or 0) > (found[c["url"]].get("score") or 0):
+                        found[c["url"]] = c
+    except Exception:  # noqa: BLE001 — sin resultados, el tema queda como estaba
+        pass
+    ranked = sorted(found.values(), key=lambda c: c.get("score") or 0, reverse=True)[:8]
+    with SessionLocal() as db:
+        web_jobs.save_tema_research(db, track_id, index, ranked)
+
+
+def enqueue_research_tema(track_id: int, index: int, meta: dict) -> None:
+    _resolver.submit(_research_tema, track_id, index, meta)
+
+
 def enqueue_resolve(tracks: list[tuple[int, str, dict | None]], force: bool = False) -> None:
     for track_id, url, known_meta in tracks:
         _resolver.submit(_resolve_track, track_id, url, known_meta, force)
