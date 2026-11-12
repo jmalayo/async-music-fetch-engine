@@ -21,6 +21,8 @@ def build_authorize_url(client_id: str, redirect_uri: str, scopes: str, state: s
         "scope": scopes,
         "redirect_uri": redirect_uri,
         "state": state,
+        # Siempre muestra la pantalla de Spotify (con «¿No eres tú?»), así se puede elegir otra cuenta.
+        "show_dialog": "true",
     }
 
     return f"{AUTHORIZE_URL}?{urlencode(params)}"

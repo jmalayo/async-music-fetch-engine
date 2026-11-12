@@ -29,6 +29,7 @@ def test_retorno_por_la_web_guarda_el_token_y_vuelve_a_la_web(client, web_redire
     url = client.post("/auth/spotify/authorize").json()["url"]
     query = parse_qs(urlparse(url).query)
     assert query["redirect_uri"] == [web_redirect]
+    assert query["show_dialog"] == ["true"]  # deja cambiar de cuenta de Spotify
     state = query["state"][0]
 
     r = client.get(f"/auth/spotify/callback?code=abc&state={state}", follow_redirects=False)
