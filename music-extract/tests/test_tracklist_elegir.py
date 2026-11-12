@@ -82,3 +82,42 @@ def test_tema_que_no_existe_o_trabajo_confirmado(client, fake_engine):
     assert client.post(f"/jobs/{job_id}/tracks/{tid}/temas/9/research").status_code == 404
     client.post(f"/jobs/{job_id}/confirm")
     assert client.post(f"/jobs/{job_id}/tracks/{tid}/temas/0/research").status_code == 409
+
+
+def test_tema_con_score_bajo_trae_dos_sugerencias_en_la_primera_busqueda(client, fake_engine, monkeypatch):
+    from infrastructure.external import downloader_service
+
+    flojos = [{"id": f"flo{i}", "title": f"Algo {i}", "channel": "X", "duration": 3, "url": f"https://www.youtube.com/watch?v=flojo{i:06d}",
+               "source": "yt-dlp", "score": 40.0 - i} for i in range(4)]
+    real = downloader_service.search_song
+    monkeypatch.setattr(downloader_service, "search_song",
+                        lambda artist, title, *a, **kw: [dict(c) for c in flojos] if title == "Uno" else real(artist, title, *a, **kw))
+
+    job_id, track = mix(client, fake_engine, temas_sin_video=())
+    uno, dos = track["tracklist"]["temas"]
+    # Sin video que alcance: se ofrecen las 2 mejores para aceptar, rechazar o escuchar.
+    assert uno["video"] is None and [s["url"] for s in uno["sugerencias"]] == [flojos[0]["url"], flojos[1]["url"]]
+    # Con buen score: ya tiene su video y no hace falta sugerir.
+    assert dos["video"] is not None and dos["sugerencias"] == []
+
+
+def test_lo_buscado_con_el_puntaje_anterior_se_vuelve_a_buscar(client, fake_engine):
+    from core import web_jobs
+    from infrastructure.external import downloader_service
+    from infrastructure.persistence.database import SessionLocal
+
+    url = yt("viejomix")
+    fake_engine.behavior[f"{url}#seconds"] = 6.0
+    viejo = {"inicio_s": 0, "fin_s": 3, "titulo": "Uno", "candidatos": []}  # buscado antes, sin versión
+    data = {"origen": "youtube", "title": "Mix viejo", "artist": "DJ", "duration_s": 6, "disponible": True, "motivo": None,
+            "candidatos": [], "chapters": [viejo, {**viejo, "inicio_s": 3, "fin_s": None, "titulo": "Dos"}]}
+    fake_engine.resolved[url] = data
+    with SessionLocal() as db:
+        web_jobs.store_resolution(db, url, data)
+
+    job_id = create_youtube(client, [url], carpeta="Viejo", tracklist={"cortar": True})
+    temas = preview_ready(client, job_id)["tracks"][0]["tracklist"]["temas"]
+    assert all(t["video"] is not None for t in temas)  # se buscaron de nuevo con el puntaje de ahora
+    with SessionLocal() as db:
+        guardado = web_jobs.cached_resolution(db, url)
+    assert all(c["busqueda"] == downloader_service.TEMA_SEARCH_VERSION for c in guardado["chapters"])

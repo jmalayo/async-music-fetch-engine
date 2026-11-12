@@ -17,7 +17,7 @@ from starlette.background import BackgroundTask
 
 from config.settings import MUSIC_DOWNLOADED_ROOT
 from infrastructure.persistence.models import Track
-from musictools.download.audio import safe_name
+from musictools.download.audio import media_type, safe_name
 
 _UNSAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
 
@@ -89,7 +89,7 @@ def serve_tracks(db: Session, tracks: list[Track], *, name: str, force_zip: bool
     if len(tracks) == 1 and not force_zip and nube.has_main(tracks[0]) and (modo == "entero" or (modo is None and not _cut(tracks[0]))):
         tracks[0].descargas = (tracks[0].descargas or 0) + 1
         db.commit()
-        return RedirectResponse(nube.presigned_url(nube.main_key(tracks[0].nube)), status_code=307)
+        return RedirectResponse(nube.presigned_url(nube.track_main_key(tracks[0])), status_code=307)
 
     fetched = nube.hydrate(tracks)
     try:
@@ -124,7 +124,7 @@ def _serve_local(db: Session, tracks: list[Track], *, name: str, force_zip: bool
     # Una sola canción con su MP3: se entrega tal cual.
     if not force_zip and len(found) == 1 and found[0][1].is_file():
         path = found[0][1]
-        return FileResponse(path, media_type="audio/mpeg", filename=path.name, background=BackgroundTask(nube.discard, fetched))
+        return FileResponse(path, media_type=media_type(path), filename=path.name, background=BackgroundTask(nube.discard, fetched))
 
     fd, tmp = tempfile.mkstemp(suffix=".zip")
     os.close(fd)

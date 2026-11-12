@@ -499,6 +499,7 @@ def preview_payload(db: Session, job_id: str) -> dict:
         "status": job.status,
         "playlist_name": job.playlist_name,
         "carpeta": job.carpeta,
+        "formato": job_format(db, job),
         "total": len(tracks),
         "resueltas": sum(1 for t in tracks if t.status != "resolving"),
         "tracks": [track_payload(t) for t in tracks],
@@ -781,6 +782,37 @@ def choose_suggestion(db: Session, job_id: str, track_id: int, url: str | None, 
         return track
 
 
+FORMATOS = ("mp3", "original")
+
+
+def is_individual(db: Session, job: Job) -> bool:
+    """Trabajo «I»: una sola canción, sin playlist (la misma regla que la letra P/L/I de la web)."""
+    return not job.playlist_name and db.query(Track).filter(Track.job_id == job.job_id).count() <= 1
+
+
+def job_format(db: Session, job: Job | None) -> str:
+    """Formato con que se bajan las canciones del trabajo. Una canción individual siempre va en MP3."""
+    if job is None or is_individual(db, job):
+        return "mp3"
+    return job.formato or "mp3"
+
+
+def set_format(db: Session, job_id: str, formato: str) -> None:
+    """MP3 (convertido) u original (Opus o AAC sin convertir), mientras el trabajo está en vista previa. Las
+    canciones individuales («I») se bajan siempre en MP3."""
+    if formato not in FORMATOS:
+        raise Conflict("Formato no válido: elige «mp3» u «original».")
+    with _lock:
+        job = _get_job(db, job_id)
+        if job.status not in ("resolving", "preview"):
+            raise Conflict("El formato ya no se puede cambiar: el trabajo ya se confirmó.")
+        if formato != "mp3" and is_individual(db, job):
+            raise Conflict("Una canción individual se baja siempre en MP3.")
+        job.formato = formato
+        job.updated_at = _now()
+        db.commit()
+
+
 def set_folder(db: Session, job_id: str, carpeta: str | None) -> list[tuple[int, str, dict | None]]:
     """Cambia la carpeta de destino mientras el trabajo está en vista previa. Vacía vuelve a la de por defecto.
 
@@ -983,7 +1015,9 @@ def download_plan(db: Session, track_id: int) -> dict:
     known_meta = None
     if origen_of(track.url) == "spotify" and track.title:
         known_meta = {"name": track.title, "artists": [track.artist] if track.artist else [], "duration_s": track.duration_s or 0}
+    job = db.get(Job, track.job_id)
     return {
+        "formato": job_format(db, job),
         "candidates": preview.get("candidatos") or None,
         "temas": _plan_temas(db, track, preview.get("chapters") or [], tracklist) if tracklist.get("cortar") else [],
         "cortar": bool(tracklist.get("cortar")),

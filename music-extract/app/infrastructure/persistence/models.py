@@ -28,6 +28,8 @@ class Job(Base):
     # Flujo de la web: origen (spotify | youtube) y carpeta de destino elegida por el usuario.
     origen = Column(String(16), nullable=True)
     carpeta = Column(String(255), nullable=True)
+    # Formato de las descargas: «mp3» (convertido, compatible con todo) u «original» (Opus o AAC tal como vino).
+    formato = Column(String(16), nullable=True)
     # Dueño del trabajo; None = descarga sin cuenta (archivos temporales, sin biblioteca).
     user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
 

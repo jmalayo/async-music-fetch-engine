@@ -121,6 +121,35 @@ def convert_to_mp3(src: Path, dst: Path, *, bitrate: str = "192k", duration_s: f
     return dst
 
 
+# Audio que guarda owlo: MP3 (convertido) o el original de YouTube/TikTok sin volver a codificar.
+AUDIO_EXTS = (".mp3", ".opus", ".m4a", ".ogg")
+_ORIGINAL_EXT = {"opus": ".opus", "aac": ".m4a", "mp3": ".mp3", "vorbis": ".ogg"}
+MEDIA_TYPES = {".mp3": "audio/mpeg", ".opus": "audio/ogg", ".ogg": "audio/ogg", ".m4a": "audio/mp4"}
+
+
+def media_type(path) -> str:
+    return MEDIA_TYPES.get(Path(path).suffix.lower(), "application/octet-stream")
+
+
+def keep_original(src: Path) -> Path:
+    """Formato original: el audio tal cual vino (Opus → .opus, AAC → .m4a), solo cambiando el contenedor, sin
+    volver a codificar (no pierde calidad y es casi instantáneo)."""
+    probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name",
+                            "-of", "csv=p=0", str(src)], capture_output=True, text=True)
+    ext = _ORIGINAL_EXT.get(probe.stdout.strip().lower())
+    if ext is None:
+        raise FfmpegError(f"Códec de audio no reconocido: {probe.stdout.strip() or probe.stderr.strip()[-120:]}")
+    if src.suffix.lower() == ext:
+        return src
+    dst = src.with_suffix(ext)
+    cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-i", str(src), "-vn", "-map", "0:a:0", "-c:a", "copy", str(dst)]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise FfmpegError(f"No se pudo guardar el audio original: {result.stderr.strip()[-200:]}")
+    src.unlink(missing_ok=True)
+    return dst
+
+
 def safe_name(text: str, max_len: int = 120) -> str:
     cleaned = _UNSAFE.sub(" ", text or "").strip(" .")
     return re.sub(r"\s+", " ", cleaned)[:max_len] or "sin titulo"
@@ -147,7 +176,7 @@ def cut_chapters(src: Path, chapters: list[dict], dest_dir: Path) -> list[Path]:
         if end is None and i + 1 < total:
             end = chapters[i + 1].get("inicio_s")
 
-        out = dest_dir / f"{i + 1:02d} - {safe_name(chapter.get('titulo') or f'Tema {i + 1}')}.mp3"
+        out = dest_dir / f"{i + 1:02d} - {safe_name(chapter.get('titulo') or f'Tema {i + 1}')}{src.suffix.lower()}"
         cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-ss", f"{start:.3f}"]
         if end is not None:
             cmd += ["-to", f"{float(end):.3f}"]

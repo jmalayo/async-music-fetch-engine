@@ -132,7 +132,8 @@ def _resolve_track(track_id: int, url: str, known_meta: dict | None, force: bool
     with SessionLocal() as db:
         temas = bool(data.get("chapters")) and web_jobs.wants_temas(db, track_id)
     # Los temas del tracklist se buscan solo si faltan (lo guardado puede venir de una vista previa sin tracklist).
-    searched_temas = temas and not all("candidatos" in c for c in data["chapters"])
+    # También si se buscaron con un puntaje anterior (sin `busqueda` actual): se vuelven a buscar con el de ahora.
+    searched_temas = temas and not all("candidatos" in c and c.get("busqueda") == TEMA_SEARCH_VERSION for c in data["chapters"])
     if searched_temas:
         data = {**data, "chapters": _search_temas(data["chapters"], data.get("duration_s"))}
 
@@ -158,6 +159,10 @@ def _wider_candidates(meta: dict, found: list[dict], top_n: int = 8) -> list[dic
     return sorted(by_url.values(), key=lambda c: c.get("score") or 0, reverse=True)[:top_n]
 
 
+# Sube cuando cambia cómo se puntúan los temas: lo guardado con otra versión se vuelve a buscar.
+TEMA_SEARCH_VERSION = 2
+
+
 def _search_temas(chapters: list[dict], total_s: float | None) -> list[dict]:
     """Busca cada tema del tracklist como canción completa en YouTube (como con Spotify), varios a la vez."""
     def one(i: int, chapter: dict) -> dict:
@@ -170,7 +175,12 @@ def _search_temas(chapters: list[dict], total_s: float | None) -> list[dict]:
             candidatos = search_song(artista, cancion, duracion, cookies_file=COOKIES_FILE, js_runtime=_js_runtime, proxy=PROXY, tema=True)
         except Exception:  # noqa: BLE001 — sin búsqueda, el tema se corta del set
             candidatos = []
-        return {**chapter, "artista": artista, "cancion": cancion, "candidatos": candidatos}
+        found = {**chapter, "artista": artista, "cancion": cancion, "candidatos": candidatos, "busqueda": TEMA_SEARCH_VERSION}
+        found.pop("elegido", None)
+        # Score bajo: las 2 mejores coincidencias quedan como sugerencias desde esta misma búsqueda (✓ / ✕ / escuchar).
+        best = (candidatos[0].get("score") or 0) if candidatos else None
+        found["sugerencias"] = candidatos[:2] if best is not None and best < web_jobs.MIN_TEMA_SCORE else []
+        return found
 
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix="tema") as pool:
         return list(pool.map(lambda pair: one(*pair), enumerate(chapters)))
@@ -229,7 +239,7 @@ def _move_results(work_dir: Path, out_dir: Path) -> dict:
     for item in work_dir.iterdir():
         if item.name.startswith("."):
             continue
-        if item.is_dir() or item.suffix.lower() == f".{FORMAT}":
+        if item.is_dir() or item.suffix.lower() in audio.AUDIO_EXTS:
             target = out_dir / item.name
             if item.is_dir():
                 # Se combinan: otra descarga del mismo set pudo dejar otros temas en esa carpeta.
@@ -260,7 +270,7 @@ def _move_results(work_dir: Path, out_dir: Path) -> dict:
 def _download_temas(work_dir: Path, plan: dict, reporter: Reporter) -> dict | None:
     """Baja cada tema del tracklist como canción completa (su propio video) y, si no hay uno bueno o falla, lo corta
     del set. El set completo queda guardado. Devuelve los archivos de cada tema y de dónde salió cada uno."""
-    mp3s = sorted(p for p in work_dir.glob(f"*.{FORMAT}"))
+    mp3s = sorted(p for p in work_dir.iterdir() if p.is_file() and p.suffix.lower() in audio.AUDIO_EXTS)
     if not mp3s or not plan["temas"]:
         return None
     full = mp3s[0]
@@ -278,7 +288,8 @@ def _download_temas(work_dir: Path, plan: dict, reporter: Reporter) -> dict | No
         reporter.set_context(etapa="temas", tema_actual=k, temas=len(temas), temas_estado=list(estados))
         reporter.update(fase="descargando", porcentaje=0.0, bytes=0, bytes_total=None, velocidad_bps=None, eta_s=None)
         index = tema["index"]
-        target = folder / f"{index + 1:02d} - {audio.safe_name(tema['titulo'])}.{FORMAT}"
+        stem = f"{index + 1:02d} - {audio.safe_name(tema['titulo'])}"
+        target = folder / f"{stem}{full.suffix.lower()}"
         duracion = (tema["fin_s"] - tema["inicio_s"]) if tema.get("fin_s") is not None else None
 
         ok = False
@@ -287,10 +298,12 @@ def _download_temas(work_dir: Path, plan: dict, reporter: Reporter) -> dict | No
             tmp.mkdir(exist_ok=True)
             result = download_song(
                 artist=tema["artista"], title=tema["cancion"], duration_s=duracion, candidates=tema["candidatos"], out_dir=tmp,
-                cookies_file=COOKIES_FILE, cache_path=BLOCKED_CACHE_PATH, js_runtime=_js_runtime, fmt=FORMAT, bitrate=BITRATE, proxy=PROXY,
+                cookies_file=COOKIES_FILE, cache_path=BLOCKED_CACHE_PATH, js_runtime=_js_runtime, fmt=plan.get("formato") or FORMAT, bitrate=BITRATE, proxy=PROXY,
             )
-            got = sorted(tmp.glob(f"*.{FORMAT}"))
+            got = sorted(p for p in tmp.iterdir() if p.is_file() and p.suffix.lower() in audio.AUDIO_EXTS)
             if result["estado"] == "successful" and got:
+                # Con formato original, el tema puede venir en otro contenedor que el set (Opus o AAC).
+                target = folder / f"{stem}{got[0].suffix.lower()}"
                 shutil.move(str(got[0]), str(target))
                 ok = True
                 fuentes[index] = "video"
@@ -346,7 +359,7 @@ def _process_track(job_id: str, track_id: int, url: str, iteration_count: int, k
                 cookies_file=COOKIES_FILE,
                 cache_path=BLOCKED_CACHE_PATH,
                 js_runtime=_js_runtime,
-                fmt=FORMAT,
+                fmt=plan.get("formato") or FORMAT,
                 bitrate=BITRATE,
                 spotify_creds=_spotify_creds,
                 proxy=PROXY,

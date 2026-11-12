@@ -3,7 +3,7 @@
 El disco local sigue siendo la fuente: R2 es una copia para usar la biblioteca con la PC apagada. Cada canción
 se sube con claves por identificador (no por nombre), así que renombrar o mover carpetas no toca los archivos:
 
-    v1/u/{id_usuario}/t/{id_cancion}-{clave}.mp3       canción entera o set completo
+    v1/u/{id_usuario}/t/{id_cancion}-{clave}.mp3       canción entera o set completo (.opus / .m4a si es el original)
     v1/u/{id_usuario}/t/{id_cancion}-{clave}/NN.mp3    temas del tracklist (NN = índice en el tracklist + 1)
     v1/u/{id_usuario}/biblioteca.json                  carpetas, nombres y claves (lo que lee la app)
 
@@ -30,6 +30,7 @@ from infrastructure.persistence.models import Job, Track
 log = logging.getLogger(__name__)
 
 VERSION = "v1"
+_AUDIO_EXTS = (".mp3", ".opus", ".m4a", ".ogg")
 _ALPHABET = string.ascii_lowercase + string.digits
 
 _client = None
@@ -100,12 +101,23 @@ def new_base(user_id: int, track_id: int) -> str:
     return f"{VERSION}/u/{user_id}/t/{track_id}-{clave}"
 
 
-def main_key(base: str) -> str:
-    return f"{base}.mp3"
+def main_key(base: str, ext: str = ".mp3") -> str:
+    return f"{base}{ext.lower()}"
 
 
-def tema_key(base: str, index: int) -> str:
-    return f"{base}/{index + 1:02d}.mp3"
+def tema_key(base: str, index: int, ext: str = ".mp3") -> str:
+    return f"{base}/{index + 1:02d}{ext.lower()}"
+
+
+def track_main_key(track: Track) -> str:
+    return main_key(track.nube, Path(track.archivo or "").suffix or ".mp3")
+
+
+def track_tema_key(track: Track, index: int) -> str:
+    from core import web_jobs
+
+    path = web_jobs.tema_files(track).get(index)
+    return tema_key(track.nube, index, path.suffix if path is not None else ".mp3")
 
 
 def manifest_key(user_id: int) -> str:
@@ -200,13 +212,15 @@ def _upload_track(track_id: int, publish: bool = True) -> None:
         base = new_base(user_id, track.track_id)
 
     s3 = _s3()
+    from musictools.download.audio import media_type
+
     if main is not None and main.is_file():
-        s3.upload_file(str(main), bucket(), main_key(base),
-                       ExtraArgs={"ContentType": "audio/mpeg", "ContentDisposition": _disposition(main.name)})
+        s3.upload_file(str(main), bucket(), main_key(base, main.suffix),
+                       ExtraArgs={"ContentType": media_type(main), "ContentDisposition": _disposition(main.name)})
     for index, path in sorted(temas.items()):
         if path.is_file():
-            s3.upload_file(str(path), bucket(), tema_key(base, index),
-                           ExtraArgs={"ContentType": "audio/mpeg", "ContentDisposition": _disposition(path.name)})
+            s3.upload_file(str(path), bucket(), tema_key(base, index, path.suffix),
+                           ExtraArgs={"ContentType": media_type(path), "ContentDisposition": _disposition(path.name)})
 
     with _lock, SessionLocal() as db:
         track = db.get(Track, track_id)
@@ -228,16 +242,16 @@ def _upload_track(track_id: int, publish: bool = True) -> None:
 
 
 def _delete_prefix(base: str) -> None:
-    """Borra el set (`base.mp3`) y sus temas (`base/…`)."""
+    """Borra el set (`base.mp3`, `base.opus`…) y sus temas (`base/…`)."""
     s3 = _s3()
-    keys = [main_key(base)]
+    keys = []
     token = None
     while True:
-        kwargs = {"Bucket": bucket(), "Prefix": f"{base}/"}
+        kwargs = {"Bucket": bucket(), "Prefix": base}
         if token:
             kwargs["ContinuationToken"] = token
         page = s3.list_objects_v2(**kwargs)
-        keys += [obj["Key"] for obj in page.get("Contents", [])]
+        keys += [obj["Key"] for obj in page.get("Contents", []) if obj["Key"][len(base):][:1] in (".", "/")]
         if not page.get("IsTruncated"):
             break
         token = page.get("NextContinuationToken")
@@ -273,8 +287,8 @@ def build_manifest(db, user_id: int) -> dict:
         main = _local(track.archivo)
         chapters = web_jobs._loads(track.preview, {}).get("chapters") or []
         temas = [
-            {"indice": i, "titulo": (chapters[i].get("titulo") if i < len(chapters) else None) or f"Tema {i + 1}", "clave": tema_key(track.nube, i)}
-            for i in sorted(web_jobs.tema_files(track))
+            {"indice": i, "titulo": (chapters[i].get("titulo") if i < len(chapters) else None) or f"Tema {i + 1}", "clave": tema_key(track.nube, i, p.suffix)}
+            for i, p in sorted(web_jobs.tema_files(track).items())
         ]
         entry["canciones"].append({
             "id": track.track_id,
@@ -282,7 +296,7 @@ def build_manifest(db, user_id: int) -> dict:
             "artista": track.artist,
             "bytes": track.bytes,
             "duracion_s": track.duration_s,
-            "clave": main_key(track.nube) if main is not None and main.suffix == ".mp3" else None,
+            "clave": main_key(track.nube, main.suffix) if main is not None and main.suffix.lower() in _AUDIO_EXTS else None,
             "temas": temas,
             "actualizada": track.updated_at,
         })
@@ -333,7 +347,7 @@ def presigned_url(key: str, expires_s: int = 900) -> str:
 
 def has_main(track: Track) -> bool:
     """Si la canción tiene el audio entero en R2 (los tracklists guardados solo por partes no lo tienen)."""
-    return in_cloud(track) and str(track.archivo or "").lower().endswith(".mp3")
+    return in_cloud(track) and Path(track.archivo or "").suffix.lower() in _AUDIO_EXTS
 
 
 def hydrate(tracks: list[Track]) -> list[Path]:
@@ -348,8 +362,8 @@ def hydrate(tracks: list[Track]) -> list[Path]:
         wanted = []
         main = _local(track.archivo)
         if main is not None and has_main(track) and not main.exists():
-            wanted.append((main_key(track.nube), main))
-        wanted += [(tema_key(track.nube, i), p) for i, p in web_jobs.tema_files(track).items() if not p.exists()]
+            wanted.append((main_key(track.nube, main.suffix), main))
+        wanted += [(tema_key(track.nube, i, p.suffix), p) for i, p in web_jobs.tema_files(track).items() if not p.exists()]
         for key, path in wanted:
             path.parent.mkdir(parents=True, exist_ok=True)
             _s3().download_file(bucket(), key, str(path))
@@ -376,8 +390,8 @@ def free_local(track: Track) -> int:
     pairs = []
     main = _local(track.archivo)
     if main is not None and main.is_file():
-        pairs.append((main_key(track.nube), main))
-    pairs += [(tema_key(track.nube, i), p) for i, p in web_jobs.tema_files(track).items() if p.is_file()]
+        pairs.append((main_key(track.nube, main.suffix), main))
+    pairs += [(tema_key(track.nube, i, p.suffix), p) for i, p in web_jobs.tema_files(track).items() if p.is_file()]
     s3 = _s3()
     for key, path in pairs:
         try:

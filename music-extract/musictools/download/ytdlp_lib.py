@@ -156,6 +156,7 @@ def download(
     client: str | None = None,
 ) -> tuple[bool, str, str]:
     """Baja el mejor audio y lo convierte a `fmt` con ffmpeg propio, para informar el % de las dos fases.
+    `fmt="original"` lo guarda tal como vino (Opus o AAC), sin convertir.
 
     El progreso y la cancelación salen del reporter del hilo (`progress.current()`), si hay uno.
     """
@@ -185,7 +186,12 @@ def download(
     progress.check_cancelled()
     title = (info or {}).get("title", url)
 
-    if src.suffix.lower() != f".{fmt}":
+    if fmt == "original":
+        try:
+            audio.keep_original(src)
+        except audio.FfmpegError as e:
+            return False, "error", str(e)
+    elif src.suffix.lower() != f".{fmt}":
         try:
             audio.convert_to_mp3(src, src.with_suffix(f".{fmt}"), bitrate=bitrate, duration_s=(info or {}).get("duration"))
         except audio.StalledError as e:

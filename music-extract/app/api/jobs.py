@@ -58,6 +58,8 @@ class UpdateTrackRequest(BaseModel):
 
 class UpdateJobRequest(BaseModel):
     carpeta: str | None = None
+    # «mp3» u «original». Si solo viene el formato, la carpeta no se toca.
+    formato: Literal["mp3", "original"] | None = None
 
 
 def _handle(fn):
@@ -267,11 +269,13 @@ def track_file(track_id: int, modo: Literal["entero", "partes"] | None = None, t
         if nube.in_cloud(track) and tema in web_jobs.tema_files(track):
             track.descargas = (track.descargas or 0) + 1
             db.commit()
-            return RedirectResponse(nube.presigned_url(nube.tema_key(track.nube, tema)), status_code=307)
+            return RedirectResponse(nube.presigned_url(nube.track_tema_key(track, tema)), status_code=307)
+        from musictools.download.audio import media_type
+
         path = files.tema_file(track, tema)
         track.descargas = (track.descargas or 0) + 1
         db.commit()
-        return FileResponse(path, media_type="audio/mpeg", filename=path.name)
+        return FileResponse(path, media_type=media_type(path), filename=path.name)
     return files.serve_tracks(db, [track], name=track.title or "cancion", modo=modo)
 
 
@@ -322,11 +326,18 @@ def get_preview(job_id: str, db: Session = Depends(get_db), user: User | None = 
 
 
 @router.patch("/{job_id}")
-def update_job(job_id: str, body: UpdateJobRequest, db: Session = Depends(get_db), user: User = Depends(auth.require_user)):
-    """Cambia la carpeta de destino desde la vista previa (sin cuenta los archivos se bajan directo al equipo)."""
+def update_job(job_id: str, body: UpdateJobRequest, db: Session = Depends(get_db), user: User | None = Depends(auth.current_user)):
+    """Cambia desde la vista previa la carpeta de destino (solo con cuenta: sin cuenta los archivos se bajan directo
+    al equipo) y el formato (MP3 u original)."""
     def run():
+        folder = "carpeta" in body.model_fields_set or body.formato is None
+        if folder and user is None:
+            raise HTTPException(401, "Inicia sesión para elegir la carpeta.")
         web_jobs.check_owner(db, job_id, user)
-        downloader_service.enqueue_resolve(web_jobs.set_folder(db, job_id, body.carpeta))
+        if body.formato is not None:
+            web_jobs.set_format(db, job_id, body.formato)
+        if folder:
+            downloader_service.enqueue_resolve(web_jobs.set_folder(db, job_id, body.carpeta))
         return web_jobs.preview_payload(db, job_id)
 
     return _handle(run)
