@@ -20,6 +20,8 @@ from api import files
 router = APIRouter(prefix="/library", tags=["Biblioteca"])
 
 LISTED = ("successful", "incorrect", "failed", "skipped", "waiting_auth")
+# La biblioteca muestra solo lo descargado (listo para bajar al equipo); lo que falló está en el Historial.
+DOWNLOADED = ("successful", "incorrect")
 
 
 def category(track: Track) -> str:
@@ -34,7 +36,7 @@ def _user_tracks(db: Session, user: User):
     return (
         db.query(Track, Job)
         .join(Job, Job.job_id == Track.job_id)
-        .filter(Job.user_id == user.id, Track.status.in_(LISTED), Track.eliminada.is_(False), Track.ya_descargada.is_(False))
+        .filter(Job.user_id == user.id, Track.status.in_(DOWNLOADED), Track.eliminada.is_(False), Track.ya_descargada.is_(False))
         .order_by(Track.updated_at.desc())
         .all()
     )
@@ -63,7 +65,12 @@ def library(db: Session = Depends(get_db), user: User = Depends(auth.require_use
     return {
         "usado_bytes": web_jobs.used_bytes(db, user.id),
         "cuota_bytes": user.quota_bytes,
-        "carpetas": sorted(by_folder.values(), key=lambda f: f["actualizada"] or "", reverse=True),
+        # Orden fijo (la actualizada más recientemente primero): marcar una favorita no la mueve de lugar. Las favoritas
+        # van primero solo al elegir la carpeta de destino (/folders).
+        "carpetas": sorted(
+            ({**f, "favorita": folders.is_favorite(folders.user_root(user.username) / f["slug"])} for f in by_folder.values()),
+            key=lambda f: f["actualizada"] or "", reverse=True,
+        ),
     }
 
 
@@ -83,7 +90,13 @@ def folder(slug: str, db: Session = Depends(get_db), user: User = Depends(auth.r
         payload["trabajo"] = {"job_id": job.job_id, "nombre": job.playlist_name or job.carpeta}
         tracks.append(payload)
 
-    return {"nombre": name, "slug": slug, "tracks": tracks}
+    return {
+        "nombre": name, "slug": slug, "tracks": tracks,
+        "favorita": folders.is_favorite(path),
+        # El espacio usado va en todas las secciones de la biblioteca.
+        "usado_bytes": web_jobs.used_bytes(db, user.id),
+        "cuota_bytes": user.quota_bytes,
+    }
 
 
 @router.get("/folders/{slug}/zip")
@@ -129,3 +142,24 @@ def rename_folder(slug: str, body: RenameFolderRequest, db: Session = Depends(ge
 def delete_folder(slug: str, db: Session = Depends(get_db), user: User = Depends(auth.require_user)):
     """Borra la carpeta y sus canciones del disco. Las canciones siguen en Recientes."""
     return _admin(lambda: library_admin.delete_folder(db, user, slug))
+
+
+class MoveTracksRequest(BaseModel):
+    track_ids: list[int]
+    carpeta: str
+
+
+class FavoriteRequest(BaseModel):
+    favorita: bool
+
+
+@router.post("/tracks/move")
+def move_tracks(body: MoveTracksRequest, db: Session = Depends(get_db), user: User = Depends(auth.require_user)):
+    """Mueve las canciones elegidas a otra carpeta (la crea si no existe), con sus archivos."""
+    return _admin(lambda: library_admin.move_tracks(db, user, body.track_ids, body.carpeta))
+
+
+@router.post("/folders/{slug}/favorite")
+def favorite_folder(slug: str, body: FavoriteRequest, db: Session = Depends(get_db), user: User = Depends(auth.require_user)):
+    """Marca o desmarca una carpeta como favorita: aparece primero al elegir la carpeta de destino."""
+    return _admin(lambda: library_admin.set_favorite(db, user, slug, body.favorita))

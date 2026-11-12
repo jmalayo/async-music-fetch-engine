@@ -8,7 +8,8 @@ from sqlalchemy.orm import Session
 
 from musictools.download import audio, progress
 from musictools.download.core import (
-    SpotifyCredentials, default_js_runtime, download, download_song, resolve, score_url_for, search_song, split_tema_title,
+    SpotifyCredentials, default_js_runtime, download, download_song, query_variants, resolve, score_url_for, search_song,
+    split_tema_title,
 )
 from musictools.download.progress import Reporter, TrackCancelled
 
@@ -98,28 +99,60 @@ def cancel_running(track_id: int) -> None:
 
 # --- Vista previa ---------------------------------------------------------------------------------
 
-def _resolve_track(track_id: int, url: str, known_meta: dict | None) -> None:
-    try:
-        data = resolve(
-            url,
-            cookies_file=COOKIES_FILE,
-            js_runtime=_js_runtime,
-            spotify_creds=_spotify_creds,
-            proxy=PROXY,
-            known_meta=known_meta,
-        )
-    except Exception as e:  # noqa: BLE001 — cualquier error de una canción no debe frenar la vista previa
-        with SessionLocal() as db:
-            web_jobs.save_resolution_error(db, track_id, f"{type(e).__name__}: {e}")
-        return
+def _resolve_track(track_id: int, url: str, known_meta: dict | None, force: bool = False) -> None:
+    """Busca una canción para la vista previa. Si el enlace ya se buscó hace poco (tabla busquedas), usa lo guardado
+    sin consultar YouTube ni Spotify; `force` (botón «Volver a buscar») ignora lo guardado y lo reemplaza."""
+    with SessionLocal() as db:
+        cached = None if force else web_jobs.cached_resolution(db, url)
+
+    data = cached
+    if data is None:
+        try:
+            data = resolve(
+                url,
+                cookies_file=COOKIES_FILE,
+                js_runtime=_js_runtime,
+                spotify_creds=_spotify_creds,
+                proxy=PROXY,
+                known_meta=known_meta,
+            )
+        except Exception as e:  # noqa: BLE001 — cualquier error de una canción no debe frenar la vista previa
+            with SessionLocal() as db:
+                web_jobs.save_resolution_error(db, track_id, f"{type(e).__name__}: {e}")
+            return
+
+    # «Volver a buscar» una canción de Spotify: además de la búsqueda normal se prueban otras frases, y se juntan
+    # todos los candidatos ordenados por score (de ahí salen las sugerencias de reemplazo).
+    if force and data.get("origen") == "spotify" and known_meta:
+        data = {**data, "candidatos": _wider_candidates(known_meta, data.get("candidatos") or [])}
 
     with SessionLocal() as db:
         temas = bool(data.get("chapters")) and web_jobs.wants_temas(db, track_id)
-    if temas:
-        data["chapters"] = _search_temas(data["chapters"], data.get("duration_s"))
+    # Los temas del tracklist se buscan solo si faltan (lo guardado puede venir de una vista previa sin tracklist).
+    searched_temas = temas and not all("candidatos" in c for c in data["chapters"])
+    if searched_temas:
+        data = {**data, "chapters": _search_temas(data["chapters"], data.get("duration_s"))}
 
     with SessionLocal() as db:
+        if cached is None or searched_temas:
+            web_jobs.store_resolution(db, url, data)
         web_jobs.save_resolution(db, track_id, data)
+
+
+def _wider_candidates(meta: dict, found: list[dict], top_n: int = 8) -> list[dict]:
+    artist = (meta.get("artists") or [""])[0] or ""
+    title = meta.get("name") or ""
+    by_url = {c.get("url"): c for c in found if c.get("url")}
+    for query in query_variants(artist, title):
+        try:
+            more = search_song(artist, title, meta.get("duration_s"), cookies_file=COOKIES_FILE, js_runtime=_js_runtime,
+                               proxy=PROXY, top_n=top_n, query=query)
+        except Exception:  # noqa: BLE001 — una frase que falla no frena las demás
+            more = []
+        for c in more:
+            if c.get("url") and c["url"] not in by_url:
+                by_url[c["url"]] = c
+    return sorted(by_url.values(), key=lambda c: c.get("score") or 0, reverse=True)[:top_n]
 
 
 def _search_temas(chapters: list[dict], total_s: float | None) -> list[dict]:
@@ -140,9 +173,9 @@ def _search_temas(chapters: list[dict], total_s: float | None) -> list[dict]:
         return list(pool.map(lambda pair: one(*pair), enumerate(chapters)))
 
 
-def enqueue_resolve(tracks: list[tuple[int, str, dict | None]]) -> None:
+def enqueue_resolve(tracks: list[tuple[int, str, dict | None]], force: bool = False) -> None:
     for track_id, url, known_meta in tracks:
-        _resolver.submit(_resolve_track, track_id, url, known_meta)
+        _resolver.submit(_resolve_track, track_id, url, known_meta, force)
 
 
 def resolve_new_url(url: str, track: dict) -> dict:

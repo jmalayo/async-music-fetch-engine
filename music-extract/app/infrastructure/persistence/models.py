@@ -128,3 +128,14 @@ class SpotifyToken(Base):
     client_secret = Column(String(64), nullable=True)
 
     updated_at = Column(String, default=datetime.now(timezone.utc).isoformat(), onupdate=datetime.now(timezone.utc).isoformat(), nullable=False)
+
+
+class Busqueda(Base):
+    """Lo que encontró la vista previa para un enlace (título, candidatos con su score, capítulos y la búsqueda de
+    cada tema), para no volver a buscarlo: otra vista previa del mismo enlace lo usa al instante. Es igual para todos
+    los usuarios (lo que devuelve YouTube no depende de quién pregunta). «Volver a buscar» lo reemplaza."""
+    __tablename__ = "busquedas"
+
+    clave = Column(String(500), primary_key=True)
+    datos = Column(Text, nullable=False)
+    updated_at = Column(String, nullable=False)

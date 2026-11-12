@@ -64,12 +64,13 @@ def test_biblioteca_categorias_archivo_y_contador(client, fake_engine):
 
     lib = client.get("/library").json()
     folder = next(f for f in lib["carpetas"] if f["nombre"] == "Mi Biblioteca")
-    assert (folder["descargada"], folder["recuperada"], folder["fallida"]) == (1, 1, 1)
+    # La biblioteca muestra solo lo descargado: la fallida está en el Historial, no acá.
+    assert (folder["descargada"], folder["recuperada"], folder["fallida"]) == (1, 1, 0)
     assert lib["usado_bytes"] > 0 and lib["cuota_bytes"] == 1024 ** 3
 
     detail = client.get(f"/library/folders/{folder['slug']}").json()
     cats = {t["url"]: t["categoria"] for t in detail["tracks"]}
-    assert cats == {ok: "descargada", bad: "fallida", fixed: "recuperada"}
+    assert cats == {ok: "descargada", fixed: "recuperada"}
 
     track_id = next(t["track_id"] for t in detail["tracks"] if t["url"] == ok)
     assert client.get(f"/tracks/{track_id}/file").status_code == 200

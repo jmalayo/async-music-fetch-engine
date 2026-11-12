@@ -16,11 +16,11 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session, object_session
 
-from config.settings import MAX_RETRIES_PER_TRACK, MUSIC_DOWNLOADED_ROOT, THREADS
+from config.settings import MAX_RETRIES_PER_TRACK, MUSIC_DOWNLOADED_ROOT, RESOLVE_CACHE_DAYS, THREADS
 from core import job_service
 from core.folders import DEFAULT_FOLDER
 from core.job_service import _lock, _now, calculate_max_attempts
-from infrastructure.persistence.models import Attempt, Job, Track, User
+from infrastructure.persistence.models import Attempt, Busqueda, Job, Track, User
 
 MIN_SCORE = 60
 BITRATE_BPS = 192_000
@@ -229,6 +229,33 @@ def downloaded_temas(db: Session, track: Track) -> set[int]:
     return _temas_on_disk([t for t, j in rows if job_service.slugify(j.carpeta or DEFAULT_FOLDER) == slug])
 
 
+# --- Búsquedas guardadas (tabla busquedas) ---------------------------------------------------------------------
+
+def cached_resolution(db: Session, url: str) -> dict | None:
+    """Lo que ya se encontró para este enlace, si se buscó hace menos de RESOLVE_CACHE_DAYS días."""
+    row = db.get(Busqueda, url)
+    if row is None:
+        return None
+    age = datetime.now(timezone.utc) - datetime.fromisoformat(row.updated_at)
+    if age.total_seconds() > RESOLVE_CACHE_DAYS * 86400:
+        return None
+    return _loads(row.datos, None)
+
+
+def store_resolution(db: Session, url: str, data: dict) -> None:
+    """Guarda lo encontrado para no volver a buscarlo. Lo que no se pudo leer no se guarda (puede ser pasajero:
+    un bloqueo, un corte): la próxima vez se intenta de nuevo."""
+    readable = data.get("disponible") and (data.get("origen") != "spotify" or data.get("candidatos"))
+    if not readable:
+        return
+    with _lock:
+        row = db.get(Busqueda, url) or Busqueda(clave=url)
+        row.datos = json.dumps(data)
+        row.updated_at = _now()
+        db.merge(row)
+        db.commit()
+
+
 def save_resolution(db: Session, track_id: int, data: dict) -> None:
     """Guarda lo que encontró `musictools.download.core.resolve` para una canción."""
     with _lock:
@@ -240,11 +267,22 @@ def save_resolution(db: Session, track_id: int, data: dict) -> None:
         track.artist = data.get("artist") or track.artist
         track.duration_s = data.get("duration_s") or track.duration_s
         track.motivo = data.get("motivo")
+        candidatos = list(data.get("candidatos") or [])
+        sugerencias = []
+        # «Volver a buscar»: el elegido de antes sigue elegido; los 2 mejores distintos quedan como sugerencias
+        # para que el usuario decida si reemplazarlo.
+        old = _loads(track.preview, {})
+        previous = old.get("elegido_antes")
+        if previous:
+            current = next((c for c in candidatos if c.get("url") == previous.get("url")), previous)
+            candidatos = [current] + [c for c in candidatos if c.get("url") != previous.get("url")]
+            sugerencias = candidatos[1:3]
         track.preview = json.dumps({
-            "candidatos": data.get("candidatos") or [],
-            "disponible": bool(data.get("disponible")),
+            "candidatos": candidatos,
+            "disponible": bool(data.get("disponible")) or bool(candidatos),
             "chapters": data.get("chapters") or [],
             "thumbnail": data.get("thumbnail"),
+            "sugerencias": sugerencias,
         })
         track.status = "preview"
         track.updated_at = _now()
@@ -263,12 +301,15 @@ def save_resolution_error(db: Session, track_id: int, message: str) -> None:
 
 
 def refresh_preview_status(db: Session, job_id: str) -> None:
+    """Estado de un trabajo sin confirmar: «resolving» mientras alguna canción se está buscando, si no «preview».
+    En los dos sentidos: volver a buscar una canción o activar su tracklist lo pasa otra vez a «resolving»."""
     job = db.get(Job, job_id)
-    if job is None or job.status != "resolving":
+    if job is None or job.status not in ("resolving", "preview"):
         return
     resolving = db.query(Track).filter(Track.job_id == job_id, Track.status == "resolving").count()
-    if resolving == 0:
-        job.status = "preview"
+    status = "resolving" if resolving else "preview"
+    if job.status != status:
+        job.status = status
         job.updated_at = _now()
         db.commit()
 
@@ -403,6 +444,11 @@ def track_payload(track: Track, progreso: dict | None = None) -> dict:
         # no se pudo leer pasa a «Revisa estas primero» con su motivo.
         "disponible": None if track.status == "resolving" else bool(preview.get("disponible", True)),
         "mejor": _mejor(preview) if origen == "spotify" else None,
+        # Tras «Volver a buscar»: otros videos con buen score para reemplazar al elegido (el usuario acepta o rechaza).
+        "sugerencias": [
+            {k: c.get(k) for k in ("url", "title", "channel", "duration", "thumbnail", "score", "source")}
+            for c in preview.get("sugerencias") or []
+        ] if track.status in ("preview", "rechazada") else [],
         "candidatos": len(preview.get("candidatos") or []) if origen == "spotify" else None,
         "tracklist": None if origen == "spotify" else _tracklist_payload(track, tracklist, chapters, excluded),
         "rondas_usadas": track.rondas_usadas or 0,
@@ -486,6 +532,15 @@ def summary(db: Session, job: Job) -> dict:
         # Con THREADS descargas en paralelo, el tiempo por canción efectivo es el promedio dividido por THREADS.
         "average_time_per_track_s": round(average / THREADS, 1) if average else None,
         "estimated_remaining_time_s": round(average * pending / THREADS, 1) if average else None,
+        # Descargas que corren a la vez (THREADS en config/settings.py).
+        "en_paralelo": THREADS,
+        # De dónde vienen sus canciones (sin repetir): spotify, youtube, tiktok.
+        "origenes": sorted({origen_of(t.url) for t in tracks}),
+        # Las primeras 3 canciones que se enviaron a buscar, para reconocer el trabajo de un vistazo.
+        "primeras": [
+            {"track_id": t.track_id, "titulo": t.title, "artista": t.artist, "url": t.url, "origen": origen_of(t.url), "status": t.status}
+            for t in sorted(tracks, key=lambda t: t.track_id)[:3]
+        ],
         "elapsed_time_s": elapsed,
         "created_at": job.created_at,
         "updated_at": job.updated_at,
@@ -510,7 +565,7 @@ def failed_tracks_payload(db: Session, progress_of, user_id: int) -> list[dict]:
     result = []
     for track, job in rows:
         payload = track_payload(track, progress_of(track.track_id))
-        payload["trabajo"] = {"job_id": job.job_id, "nombre": job.playlist_name or job.carpeta, "carpeta": job.carpeta, "origen": job.origen}
+        payload["trabajo"] = _job_ref(db, job)
         result.append(payload)
     return result
 
@@ -560,6 +615,57 @@ def set_included(db: Session, job_id: str, track_id: int, included: bool) -> Tra
 def _requested_options(track: Track) -> dict:
     options = _loads(track.tracklist, {}) or {}
     return options.get("pedido") or options
+
+
+def research_track(db: Session, job_id: str, track_id: int) -> tuple[Track, dict | None]:
+    """Vuelve a buscar una sola canción de la vista previa (por ejemplo, si salió con score bajo), sin rehacer el
+    trabajo. Queda «buscando» y el resolvedor la actualiza. Devuelve la canción y sus metadatos conocidos (Spotify)."""
+    with _lock:
+        job = _get_job(db, job_id)
+        if job.status not in ("resolving", "preview"):
+            raise Conflict("La canción ya no se puede volver a buscar: el trabajo ya se confirmó.")
+        track = _get_track(db, job_id, track_id)
+        if track.ya_descargada or track.status not in ("preview", "rechazada"):
+            raise Conflict("Esta canción no se puede volver a buscar ahora.")
+        known_meta = None
+        if origen_of(track.url) == "spotify" and track.title:
+            known_meta = {"name": track.title, "artists": [track.artist] if track.artist else [], "duration_s": track.duration_s or 0}
+        # Se recuerda el elegido actual: al volver, sigue elegido y lo nuevo se ofrece como sugerencia.
+        preview = _loads(track.preview, {})
+        best = next(iter(preview.get("candidatos") or []), None)
+        if best:
+            preview["elegido_antes"] = best
+            track.preview = json.dumps(preview)
+        track.status = "resolving"
+        track.updated_at = _now()
+        db.commit()
+        refresh_preview_status(db, job_id)
+        return track, known_meta
+
+
+def choose_suggestion(db: Session, job_id: str, track_id: int, url: str | None, accept: bool) -> Track:
+    """Sugerencia de reemplazo (tras «Volver a buscar»): aceptarla la pone como el video elegido (y se descartan las
+    demás); rechazarla la quita de las sugerencias."""
+    with _lock:
+        track = _get_track(db, job_id, track_id)
+        if track.status not in ("preview", "rechazada"):
+            raise Conflict("Esta canción ya no se puede cambiar.")
+        preview = _loads(track.preview, {})
+        sugerencias = preview.get("sugerencias") or []
+        chosen = next((c for c in sugerencias if c.get("url") == url), None)
+        if chosen is None:
+            raise NotFound("Esa sugerencia ya no está.")
+        if accept:
+            candidatos = preview.get("candidatos") or []
+            preview["candidatos"] = [chosen] + [c for c in candidatos if c.get("url") != url]
+            preview["sugerencias"] = []
+            track.motivo = None
+        else:
+            preview["sugerencias"] = [c for c in sugerencias if c.get("url") != url]
+        track.preview = json.dumps(preview)
+        track.updated_at = _now()
+        db.commit()
+        return track
 
 
 def set_folder(db: Session, job_id: str, carpeta: str | None) -> list[tuple[int, str, dict | None]]:
@@ -769,6 +875,13 @@ def start_round(db: Session, track_id: int) -> bool:
         track = db.get(Track, track_id)
         if track is None or track.status != "pending":
             return False
+        # Seguridad: si el trabajo se canceló (por ejemplo mientras se reanudaban sus canciones), no arranca.
+        job = db.get(Job, track.job_id)
+        if job is not None and job.status == "cancelled":
+            track.status = "cancelada"
+            track.updated_at = _now()
+            db.commit()
+            return False
         track.status = "in_progress"
         track.rondas_usadas = (track.rondas_usadas or 0) + 1
         track.motivo = None
@@ -966,6 +1079,7 @@ def unconfirmed_payload(db: Session, user_id: int) -> list[dict]:
         result.append({
             "job_id": job.job_id,
             "nombre": job.playlist_name or job.carpeta,
+            "playlist_name": job.playlist_name,  # para la letra del tipo (P playlist, L lista, I individual)
             "carpeta": job.carpeta,
             "origen": job.origen,
             "status": job.status,
@@ -986,6 +1100,38 @@ def discard_job(db: Session, job_id: str) -> None:
         db.commit()
 
 
+def _job_ref(db: Session, job: Job) -> dict:
+    """El trabajo de una canción, para agruparlas en los paneles: nombre, carpeta, letra del tipo (playlist y total)
+    y fecha de creación."""
+    total = db.query(Track).filter(Track.job_id == job.job_id).count()
+    return {"job_id": job.job_id, "nombre": job.playlist_name or job.carpeta, "carpeta": job.carpeta, "origen": job.origen,
+            "playlist_name": job.playlist_name, "total": total, "created_at": job.created_at}
+
+
+def omitted_tracks(db: Session, user_id: int, progress_of, limit: int | None = None) -> tuple[list[dict], int]:
+    """Omitidas: canciones que se pidieron pero no se bajaron por decisión o porque no hacía falta. Son las que el
+    usuario quitó en la vista previa («rechazada») y las que ya estaban en la carpeta («ya descargada»).
+    Solo de trabajos confirmados, de la más reciente a la más vieja."""
+    from sqlalchemy import or_
+
+    query = (
+        db.query(Track, Job)
+        .join(Job, Job.job_id == Track.job_id)
+        .filter(Job.user_id == user_id, Job.status.notin_(["resolving", "preview"]),
+                or_(Track.status == "rechazada", Track.ya_descargada.is_(True)))
+        .order_by(Track.updated_at.desc())
+    )
+    total = query.count()
+    rows = query.limit(limit).all() if limit else query.all()
+    items = []
+    for track, job in rows:
+        payload = track_payload(track, progress_of(track.track_id))
+        payload["motivo_omitida"] = "ya_descargada" if track.ya_descargada else "quitada"
+        payload["trabajo"] = _job_ref(db, job)
+        items.append(payload)
+    return items, total
+
+
 def tracks_with_status(db: Session, user_id: int, statuses: tuple, progress_of, limit: int | None = None) -> tuple[list[dict], int]:
     """Canciones del usuario en ciertos estados (fallidas, rechazadas), de la más reciente a la más vieja,
     solo de trabajos ya confirmados."""
@@ -1000,9 +1146,32 @@ def tracks_with_status(db: Session, user_id: int, statuses: tuple, progress_of, 
     items = []
     for track, job in rows:
         payload = track_payload(track, progress_of(track.track_id))
-        payload["trabajo"] = {"job_id": job.job_id, "nombre": job.playlist_name or job.carpeta, "carpeta": job.carpeta, "origen": job.origen}
+        payload["trabajo"] = _job_ref(db, job)
         items.append(payload)
     return items, total
+
+
+def resume_job(db: Session, job_id: str) -> list[tuple[int, str]]:
+    """«Reanudar todas»: vuelve a encolar, en una sola operación, las omitidas (quitadas en la vista previa) y las
+    canceladas de un trabajo confirmado. Al ser una sola transacción, una cancelación posterior las alcanza a todas
+    (no quedan pedidos sueltos llegando después). Devuelve las que hay que encolar."""
+    with _lock:
+        job = _get_job(db, job_id)
+        if job.status in ("resolving", "preview"):
+            raise Conflict("El trabajo todavía no se confirmó.")
+        resumed: list[tuple[int, str]] = []
+        for track in db.query(Track).filter(Track.job_id == job_id, Track.status.in_(["rechazada", "cancelada"])).all():
+            if origen_of(track.url) == "spotify" and not _loads(track.preview, {}).get("candidatos"):
+                continue  # sin candidatos no hay qué bajar: se recupera cambiando la URL
+            if track.status == "rechazada":
+                track.rondas_usadas = 0
+            track.status = "pending"
+            track.updated_at = _now()
+            resumed.append((track.track_id, track.url))
+        if resumed:
+            _reactivate_job(job)
+        db.commit()
+        return resumed
 
 
 def recover_track(db: Session, job_id: str, track_id: int) -> tuple[Track, bool]:
@@ -1028,6 +1197,9 @@ def recover_track(db: Session, job_id: str, track_id: int) -> tuple[Track, bool]
         return track, True
 
 
+RECENT_MAX = 100
+
+
 def recent_payload(db: Session, user_id: int, progress_of, page: int = 1, limit: int = 8, categoria: str | None = None) -> dict:
     """Canciones recientes de todas las carpetas del usuario, paginadas (tabla principal del tablero)."""
     query = (
@@ -1046,19 +1218,30 @@ def recent_payload(db: Session, user_id: int, progress_of, page: int = 1, limit:
     elif categoria == "rechazada":
         query = query.filter(Track.status == "rechazada")
 
-    total = query.count()
+    # Solo las RECENT_MAX más recientes (5 páginas de 20): las más viejas siguen en la base, pero no se listan.
+    total = min(query.count(), RECENT_MAX)
     limit = max(1, min(limit, 50))
     pages = max(1, -(-total // limit))
     page = max(1, min(page, pages))
-    rows = query.order_by(Track.updated_at.desc()).offset((page - 1) * limit).limit(limit).all()
+    offset = (page - 1) * limit
+    rows = query.order_by(Track.updated_at.desc()).offset(offset).limit(max(0, min(limit, total - offset))).all()
 
     items = []
     for track, job in rows:
         payload = track_payload(track, progress_of(track.track_id))
         payload["trabajo"] = {"job_id": job.job_id, "nombre": job.playlist_name or job.carpeta, "carpeta": job.carpeta,
                               "carpeta_slug": job_service.slugify(job.carpeta or DEFAULT_FOLDER)}
+        payload["tipo_descarga"] = download_kind(track, job)
         items.append(payload)
     return {"items": items, "total": total, "page": page, "pages": pages, "limit": limit}
+
+
+def download_kind(track: Track, job: Job) -> str:
+    """Cómo se pidió la canción: «tracklist» (un set cortado por canciones), «lista» (parte de una playlist o de
+    varios enlaces) o «suelta» (un solo enlace)."""
+    if (_loads(track.tracklist, {}) or {}).get("cortar") and (_loads(track.preview, {}).get("chapters")):
+        return "tracklist"
+    return "lista" if job.playlist_name or (job.amount or 0) > 1 else "suelta"
 
 
 def redownload(db: Session, track_id: int, user_id: int) -> tuple[str, int, str]:
@@ -1108,6 +1291,9 @@ def redownload(db: Session, track_id: int, user_id: int) -> tuple[str, int, str]
         return new_job.job_id, new_track.track_id, new_track.url
 
 
+PROBLEMS_ON_BOARD = 10
+
+
 def dashboard(db: Session, user: User, progress_of, n: int = 4) -> dict:
     """Todo lo del tablero en un pedido: contadores, almacenamiento y las primeras filas de cada bloque."""
     active_jobs = _user_jobs(db, user.id).filter(Job.status == "in_progress").order_by(Job.created_at).all()
@@ -1117,8 +1303,10 @@ def dashboard(db: Session, user: User, progress_of, n: int = 4) -> dict:
 
     cola, en_cola = queue_payload(db, user.id, progress_of, limit=n)
     sin_confirmar = unconfirmed_payload(db, user.id)
-    fallidas, total_fallidas = tracks_with_status(db, user.id, FAILED_STATUSES, progress_of, limit=n)
+    # Fallidas y omitidas: hasta 10 en el tablero (el resto, con «Ver más»).
+    fallidas, total_fallidas = tracks_with_status(db, user.id, FAILED_STATUSES, progress_of, limit=PROBLEMS_ON_BOARD)
     rechazadas, total_rechazadas = tracks_with_status(db, user.id, ("rechazada",), progress_of, limit=n)
+    omitidas, total_omitidas = omitted_tracks(db, user.id, progress_of, limit=PROBLEMS_ON_BOARD)
 
     return {
         "contadores": {
@@ -1127,6 +1315,7 @@ def dashboard(db: Session, user: User, progress_of, n: int = 4) -> dict:
             "sin_confirmar": len(sin_confirmar),
             "fallidas": total_fallidas,
             "rechazadas": total_rechazadas,
+            "omitidas": total_omitidas,
         },
         "almacenamiento": {"usado_bytes": used_bytes(db, user.id), "cuota_bytes": user.quota_bytes},
         "en_curso": en_curso,
@@ -1134,4 +1323,5 @@ def dashboard(db: Session, user: User, progress_of, n: int = 4) -> dict:
         "sin_confirmar": sin_confirmar,
         "fallidas": fallidas,
         "rechazadas": rechazadas,
+        "omitidas": omitidas,
     }

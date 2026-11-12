@@ -271,7 +271,7 @@ def test_lista_compartida_rechaza_enlaces_de_otros_sitios(client):
 def test_carpetas_listar_buscar_y_crear(client, downloads_root):
     r = client.post("/folders", json={"nombre": "Para Correr 2026"})
     assert r.status_code == 201, r.text
-    assert r.json() == {"nombre": "Para Correr 2026", "slug": "para_correr_2026", "canciones": 0}
+    assert r.json() == {"nombre": "Para Correr 2026", "slug": "para_correr_2026", "canciones": 0, "favorita": False}
     assert (downloads_root / "prueba" / "para_correr_2026").is_dir()
 
     assert client.post("/folders", json={"nombre": "para correr 2026"}).status_code == 409
@@ -335,3 +335,51 @@ def test_video_que_no_se_pudo_leer_se_marca_no_disponible(client, fake_engine):
     track = preview_ready(client, job_id)["tracks"][0]
     assert track["disponible"] is False
     assert track["motivo"] == "geo_restricted"
+
+
+def test_resumen_informa_las_descargas_en_paralelo(client, fake_engine):
+    from config.settings import THREADS
+
+    job_id = create_youtube(client, [yt("para")])
+    preview_ready(client, job_id)
+    assert client.get(f"/jobs/{job_id}").json()["en_paralelo"] == THREADS
+
+
+def test_volver_a_buscar_una_sola_cancion(client, fake_engine):
+    urls = [yt("rebus"), yt("rebus")]
+    job_id = create_youtube(client, urls)
+    tracks = preview_ready(client, job_id)["tracks"]
+    target, other = tracks[0], tracks[1]
+    fake_engine.resolved[target["url"]] = {"origen": "youtube", "title": "Encontrada otra vez", "artist": "Canal",
+                                           "duration_s": 100, "disponible": True, "motivo": None, "candidatos": [], "chapters": []}
+
+    r = client.post(f"/jobs/{job_id}/tracks/{target['track_id']}/research")
+    assert r.status_code == 200, r.text
+    again = preview_ready(client, job_id)["tracks"]
+    assert next(t for t in again if t["track_id"] == target["track_id"])["title"] == "Encontrada otra vez"
+    assert next(t for t in again if t["track_id"] == other["track_id"])["title"] == other["title"]  # la otra, igual
+
+    client.post(f"/jobs/{job_id}/confirm")
+    assert client.post(f"/jobs/{job_id}/tracks/{target['track_id']}/research").status_code == 409
+
+
+def test_zip_del_trabajo_solo_con_las_marcadas(client, fake_engine):
+    import io
+    import zipfile
+
+    from conftest import wait_until
+
+    urls = [yt("zips"), yt("zips")]
+    for u in urls:
+        fake_engine.resolved[u] = {"origen": "youtube", "title": f"T{u[-3:]}", "artist": "C", "duration_s": 60,
+                                   "disponible": True, "motivo": None, "candidatos": [], "chapters": []}
+    job_id = create_youtube(client, urls)
+    tracks = preview_ready(client, job_id)["tracks"]
+    client.post(f"/jobs/{job_id}/confirm")
+    wait_until(lambda: client.get(f"/jobs/{job_id}").json()["status"] == "completed")
+
+    one = tracks[0]["track_id"]
+    r = client.get(f"/jobs/{job_id}/zip?ids={one}")
+    assert r.status_code == 200
+    assert len(zipfile.ZipFile(io.BytesIO(r.content)).namelist()) == 1
+    assert client.get(f"/jobs/{job_id}/zip?ids=999999").status_code == 404

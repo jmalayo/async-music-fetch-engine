@@ -110,7 +110,7 @@ def rename_folder(db: Session, user: User, slug: str, nombre: str) -> dict:
         if new_slug != slug and old_path.is_dir():
             old_path.rename(new_path)
         new_path.mkdir(parents=True, exist_ok=True)
-        (new_path / folders.META_FILE).write_text(json.dumps({"nombre": nombre}, ensure_ascii=False), encoding="utf-8")
+        folders.write_meta(new_path, nombre=nombre)  # conserva la favorita
 
         old_prefix = f"{root.name}/{slug}/"
         jobs = {t.job_id for t in tracks}
@@ -140,3 +140,98 @@ def delete_folder(db: Session, user: User, slug: str) -> dict:
             shutil.rmtree(path)
         db.commit()
     return {"eliminadas": len(tracks), "liberado_bytes": freed}
+
+
+def _unique(path: Path) -> Path:
+    """Si ya existe algo con ese nombre en la carpeta destino, agrega « (2)», « (3)»…"""
+    if not path.exists():
+        return path
+    n = 2
+    while True:
+        candidate = path.with_name(f"{path.stem} ({n}){path.suffix}") if path.suffix else path.with_name(f"{path.name} ({n})")
+        if not candidate.exists():
+            return candidate
+        n += 1
+
+
+def move_tracks(db: Session, user: User, track_ids: list[int], nombre: str) -> dict:
+    """Mueve canciones de la biblioteca a otra carpeta (la crea si no existe): mueve sus archivos en disco (el MP3 y,
+    si es un tracklist, sus temas) y las pasa a un trabajo «movidas» de esa carpeta, así Biblioteca, Recientes y
+    «ya descargada» las ven en su carpeta nueva. El trabajo original no se toca (pierde esas canciones)."""
+    from core.web_jobs import _loads
+
+    nombre = (nombre or "").strip()
+    if not nombre:
+        raise folders.InvalidName("Elige la carpeta de destino.")
+    if len(nombre) > folders.MAX_NAME:
+        raise folders.InvalidName(f"El nombre puede tener hasta {folders.MAX_NAME} caracteres.")
+    root = folders.user_root(user.username)
+    slug = job_service.slugify(nombre)
+    target = root / slug
+
+    with _lock:
+        rows = (db.query(Track, Job).join(Job, Job.job_id == Track.job_id)
+                .filter(Job.user_id == user.id, Track.track_id.in_(track_ids or [-1]), Track.status.in_(("successful", "incorrect")),
+                        Track.eliminada.is_(False), Track.ya_descargada.is_(False)).all())
+        rows = [(t, j) for t, j in rows if job_service.slugify(j.carpeta or folders.DEFAULT_FOLDER) != slug]
+        if not rows:
+            raise NotFound("No hay canciones para mover (o ya están en esa carpeta).")
+
+        if not (target / folders.META_FILE).exists():
+            folders.write_meta(target, nombre=nombre)
+        now = _now()
+        moved_job = Job(job_id=job_service.new_job_id(), type="movidas", amount=len(rows), status="completed",
+                        origen=rows[0][1].origen, carpeta=nombre, user_id=user.id, elapsed_time_s=0.0,
+                        created_at=now, updated_at=now)
+        db.add(moved_job)
+        db.flush()
+
+        for track, job in rows:
+            old_folder = root / job_service.slugify(job.carpeta or folders.DEFAULT_FOLDER)
+            relocated: dict[Path, Path] = {}
+
+            def move(path: Path) -> Path:
+                """Mueve un archivo (o carpeta) de la carpeta vieja a la nueva, respetando su ruta dentro de ella."""
+                try:
+                    rel = path.relative_to(old_folder)
+                except ValueError:
+                    return path
+                for src, dst in relocated.items():  # ya se movió con su carpeta (temas dentro de la del set)
+                    if path == src or src in path.parents:
+                        return dst / path.relative_to(src)
+                dest = _unique(target / rel)
+                if path.exists() and _inside_root(path):
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(path), str(dest))
+                relocated[path] = dest
+                return dest
+
+            if track.archivo:
+                main = Path(track.archivo)
+                main = main if main.is_absolute() else MUSIC_DOWNLOADED_ROOT / main
+                track.archivo = str(move(main).relative_to(MUSIC_DOWNLOADED_ROOT))
+            options = _loads(track.tracklist, {}) or {}
+            if options.get("archivos"):
+                options["archivos"] = {
+                    k: str(move(MUSIC_DOWNLOADED_ROOT / v).relative_to(MUSIC_DOWNLOADED_ROOT)) for k, v in options["archivos"].items()
+                }
+                track.tracklist = json.dumps(options)
+            # Carpetas de temas que quedaron vacías en la carpeta vieja.
+            for src in relocated:
+                parent = src.parent
+                if parent != old_folder and parent.is_dir() and not any(parent.iterdir()):
+                    parent.rmdir()
+            track.job_id = moved_job.job_id
+            track.updated_at = now
+        db.commit()
+
+    return {"movidas": len(rows), "carpeta": {"nombre": nombre, "slug": slug}}
+
+
+def set_favorite(db: Session, user: User, slug: str, favorita: bool) -> dict:
+    """Marca o desmarca una carpeta como favorita (aparece primero al cambiar la carpeta de destino)."""
+    path = folders.user_root(user.username) / slug
+    if not path.is_dir() and not _folder_tracks(db, user, slug):
+        raise NotFound("No existe esa carpeta.")
+    folders.write_meta(path, favorita=bool(favorita))
+    return {"slug": slug, "favorita": bool(favorita)}

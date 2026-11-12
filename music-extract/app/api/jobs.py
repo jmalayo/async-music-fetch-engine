@@ -46,7 +46,7 @@ class CreateJobRequest(BaseModel):
 
 
 class UpdateTrackRequest(BaseModel):
-    accion: Literal["mantener", "quitar", "cambiar_url", "tracklist"]
+    accion: Literal["mantener", "quitar", "cambiar_url", "tracklist", "aceptar_sugerencia", "rechazar_sugerencia"]
     url: str | None = None
     cortar: bool | None = None
     guardar_completo: bool | None = None
@@ -212,6 +212,13 @@ def queue(db: Session = Depends(get_db), user: User = Depends(auth.require_user)
     return {"items": items, "total": total}
 
 
+@tracks_router.get("/omitted")
+def omitted(db: Session = Depends(get_db), user: User = Depends(auth.require_user)):
+    """Omitidas: las que el usuario quitó en la vista previa y las que no se bajaron porque ya estaban descargadas."""
+    items, total = web_jobs.omitted_tracks(db, user.id, downloader_service.progress_of)
+    return {"items": items, "total": total}
+
+
 @tracks_router.get("/rejected")
 def rejected(db: Session = Depends(get_db), user: User = Depends(auth.require_user)):
     """Canciones que el usuario quitó (o que no tenían candidatos) en trabajos ya confirmados."""
@@ -323,6 +330,8 @@ def update_track(job_id: str, track_id: int, body: UpdateTrackRequest, db: Sessi
         web_jobs.check_owner(db, job_id, user)
         if body.accion in ("mantener", "quitar"):
             track = web_jobs.set_included(db, job_id, track_id, body.accion == "mantener")
+        elif body.accion in ("aceptar_sugerencia", "rechazar_sugerencia"):
+            track = web_jobs.choose_suggestion(db, job_id, track_id, body.url, body.accion == "aceptar_sugerencia")
         elif body.accion == "tracklist":
             track = web_jobs.set_tracklist(db, job_id, track_id, body.cortar, body.guardar_completo, body.excluidos)
             if track.status == "resolving":
@@ -339,6 +348,20 @@ def update_track(job_id: str, track_id: int, body: UpdateTrackRequest, db: Sessi
                 downloader_service.enqueue_track(job_id, track.track_id, track.url)
         db.refresh(track)
         return web_jobs.track_payload(track, downloader_service.progress_of(track.track_id))
+
+    return _handle(run)
+
+
+@router.post("/{job_id}/tracks/{track_id}/research")
+def research_track(job_id: str, track_id: int, db: Session = Depends(get_db), user: User | None = Depends(auth.current_user)):
+    """Vuelve a buscar solo esta canción en la vista previa (el resto del trabajo no se toca)."""
+    def run():
+        web_jobs.check_owner(db, job_id, user)
+        track, known_meta = web_jobs.research_track(db, job_id, track_id)
+        # Ignora la búsqueda guardada: busca de nuevo y la reemplaza.
+        downloader_service.enqueue_resolve([(track.track_id, track.url, known_meta)], force=True)
+        db.refresh(track)
+        return web_jobs.track_payload(track)
 
     return _handle(run)
 
@@ -402,6 +425,18 @@ def cancel_job(job_id: str, db: Session = Depends(get_db), user: User | None = D
     return _handle(run)
 
 
+@router.post("/{job_id}/resume")
+def resume_job(job_id: str, db: Session = Depends(get_db), user: User | None = Depends(auth.current_user)):
+    """«Reanudar todas»: omitidas y canceladas vuelven a la cola en una sola operación."""
+    def run():
+        web_jobs.check_owner(db, job_id, user)
+        for track_id, url in web_jobs.resume_job(db, job_id):
+            downloader_service.enqueue_track(job_id, track_id, url)
+        return web_jobs.job_summary(db, job_id)
+
+    return _handle(run)
+
+
 @router.post("/{job_id}/tracks/{track_id}/retry")
 def retry_track(job_id: str, track_id: int, db: Session = Depends(get_db), user: User | None = Depends(auth.current_user)):
     def run():
@@ -425,12 +460,17 @@ def requeue_track(job_id: str, track_id: int, db: Session = Depends(get_db), use
 
 
 @router.get("/{job_id}/zip")
-def job_zip(job_id: str, db: Session = Depends(get_db), user: User | None = Depends(auth.current_user)):
-    """Todo lo que bajó un trabajo, en un ZIP (para la descarga sin cuenta y para llevarse un trabajo entero)."""
+def job_zip(job_id: str, ids: str | None = None, db: Session = Depends(get_db), user: User | None = Depends(auth.current_user)):
+    """Todo lo que bajó un trabajo, en un ZIP (para la descarga sin cuenta y para llevarse un trabajo entero).
+    `ids` («3,7,9»): solo esas canciones (las marcadas en la tabla del trabajo)."""
     from infrastructure.persistence.models import Track
 
     job = _handle(lambda: web_jobs.check_owner(db, job_id, user))
-    tracks = db.query(Track).filter(Track.job_id == job_id, Track.archivo.isnot(None)).all()
+    query = db.query(Track).filter(Track.job_id == job_id, Track.archivo.isnot(None))
+    if ids:
+        wanted = [int(x) for x in ids.split(",") if x.strip().isdigit()]
+        query = query.filter(Track.track_id.in_(wanted or [-1]))
+    tracks = query.all()
     if not tracks:
         raise HTTPException(404, "Este trabajo todavía no tiene archivos para bajar.")
     return files.serve_tracks(db, tracks, name=job.playlist_name or job.carpeta or "owlo", force_zip=True)

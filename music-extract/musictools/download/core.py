@@ -580,6 +580,17 @@ def split_tema_title(text: str) -> tuple[str, str]:
     return (parts[0].strip(), parts[1].strip()) if len(parts) == 2 else ("", clean)
 
 
+_NOISE = re.compile(r"\s*[\(\[][^\)\]]*(?:remaster|edit|version|versión|mix|live|mono|stereo|feat|ft\.)[^\)\]]*[\)\]]|\s+-\s+.*$|\s+(?:feat|ft)\.?\s.*$", re.I)
+
+
+def query_variants(artist: str, title: str) -> list[str]:
+    """Otras frases para buscar la misma canción, para «Volver a buscar»: además de «artista título», solo el título
+    y el título sin agregados («(Remastered 2011)», «- Radio Edit», «feat. …»)."""
+    clean = _NOISE.sub("", title or "").strip() or title
+    queries = [f"{artist} {title}", f"{artist} {clean}", title, clean, f"{clean} {artist} audio"]
+    return list(dict.fromkeys(q.strip() for q in queries if q and q.strip()))
+
+
 def search_song(
     artist: str,
     title: str,
@@ -589,11 +600,13 @@ def search_song(
     js_runtime: str | None = None,
     proxy: str | None = None,
     top_n: int = 5,
+    query: str | None = None,
 ) -> list[dict]:
-    """Busca una canción en YouTube (como con Spotify) y devuelve los `top_n` candidatos puntuados."""
+    """Busca una canción en YouTube (como con Spotify) y devuelve los `top_n` candidatos puntuados. `query` cambia la
+    frase de búsqueda; el score se sigue calculando contra `artist` y `title`."""
     js_runtime = js_runtime or default_js_runtime()
     with _private_cookies_copy(cookies_file) as private_cookies:
-        found = gather_candidates(f"{artist} {title}".strip(), cookies_file=private_cookies, js_runtime=js_runtime, proxy=proxy)
+        found = gather_candidates(query or f"{artist} {title}".strip(), cookies_file=private_cookies, js_runtime=js_runtime, proxy=proxy)
     return [_public_candidate(c) for c in rank(found, artist, title, duration_s or 0, top_n=top_n)] if found else []
 
 

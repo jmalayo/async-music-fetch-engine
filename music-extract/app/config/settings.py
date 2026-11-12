@@ -22,6 +22,8 @@ THREADS = 3
 TOP_N = 5
 CLIENT_CHAIN_LEN = 5
 MAX_RETRIES_PER_TRACK = 3
+# Días que vale una búsqueda guardada de la vista previa (tabla busquedas). Después se vuelve a buscar.
+RESOLVE_CACHE_DAYS = int(os.getenv("RESOLVE_CACHE_DAYS", "7"))
 ETA_WINDOW = 20
 
 # Sin límite de duración: una descarga se corta solo si se estanca. yt-dlp corta la conexión tras

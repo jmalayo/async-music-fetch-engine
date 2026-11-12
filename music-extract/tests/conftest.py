@@ -90,6 +90,7 @@ def fake_engine(monkeypatch):
             self.calls = []
 
         def resolve(self, url, **kwargs):
+            self.resolves.append(url)
             if url in self.resolved:
                 return self.resolved[url]
             if "open.spotify.com" in url:
@@ -154,7 +155,7 @@ def fake_engine(monkeypatch):
             return {"estado": "successful", "mensaje": "ok", "intentos": [], "url": used}
 
     engine = Engine()
-    engine.temas, engine.searches, engine.song_downloads = {}, [], []
+    engine.temas, engine.searches, engine.song_downloads, engine.resolves = {}, [], [], []
     monkeypatch.setattr(downloader_service, "resolve", engine.resolve)
     monkeypatch.setattr(downloader_service, "download", engine.download)
     monkeypatch.setattr(downloader_service, "search_song", engine.search_song)

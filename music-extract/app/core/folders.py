@@ -24,6 +24,26 @@ class InvalidName(Exception):
     pass
 
 
+def read_meta(path: Path) -> dict:
+    """Datos guardados de la carpeta (.owlo-carpeta.json): su nombre visible y si es favorita."""
+    try:
+        data = json.loads((path / META_FILE).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_meta(path: Path, **changes) -> None:
+    """Cambia datos de la carpeta sin perder los demás (renombrar no borra la favorita, ni al revés)."""
+    path.mkdir(parents=True, exist_ok=True)
+    data = {**read_meta(path), **changes}
+    (path / META_FILE).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def is_favorite(path: Path) -> bool:
+    return bool(read_meta(path).get("favorita"))
+
+
 def _display_name(path: Path) -> str:
     try:
         return json.loads((path / META_FILE).read_text(encoding="utf-8"))["nombre"]
@@ -52,7 +72,7 @@ def anon_root() -> Path:
 
 
 def folder_payload(path: Path) -> dict:
-    return {"nombre": _display_name(path), "slug": path.name, "canciones": _count_songs(path)}
+    return {"nombre": _display_name(path), "slug": path.name, "canciones": _count_songs(path), "favorita": is_favorite(path)}
 
 
 def list_folders(root: Path, query: str | None = None) -> list[dict]:
@@ -69,7 +89,8 @@ def list_folders(root: Path, query: str | None = None) -> list[dict]:
             continue
         folders.append(payload)
 
-    return sorted(folders, key=lambda f: job_service.normalize_name(f["nombre"]))
+    # Las favoritas primero (son las que aparecen arriba al cambiar la carpeta de destino), después por nombre.
+    return sorted(folders, key=lambda f: (not f["favorita"], job_service.normalize_name(f["nombre"])))
 
 
 def create_folder(root: Path, nombre: str) -> dict:

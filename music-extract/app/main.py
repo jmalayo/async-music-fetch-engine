@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from config.settings import WEB_ORIGINS
 from infrastructure.persistence.database import init_db
 from infrastructure.external import downloader_service
-from api import downloads, stages, auth, jobs, folders, session, library
+from api import downloads, stages, auth, jobs, folders, session, library, links
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -39,3 +39,4 @@ app.include_router(jobs.router)
 app.include_router(jobs.tracks_router)
 app.include_router(folders.router)
 app.include_router(library.router)
+app.include_router(links.router)
