@@ -11,7 +11,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from config.settings import MUSIC_DOWNLOADED_ROOT
-from core import folders, job_service
+from core import folders, job_service, nube
 from core.job_service import _lock, _now
 from core.web_jobs import Conflict, NotFound, tema_files
 from infrastructure.persistence.models import Job, Track, User
@@ -69,6 +69,7 @@ def _remove_files(db: Session, track: Track) -> int:
                     target.unlink()
     track.archivo = None
     track.bytes = None
+    track.nube = None
     track.eliminada = True
     track.updated_at = _now()
     return freed
@@ -82,8 +83,10 @@ def delete_tracks(db: Session, user: User, track_ids: list[int]) -> dict:
             raise NotFound("No hay canciones para borrar.")
         if any(t.status in BUSY for t in tracks):
             raise Conflict("Hay canciones que se están descargando: espera a que terminen o cancélalas.")
+        bases = [t.nube for t in tracks if t.nube]
         freed = sum(_remove_files(db, t) for t in tracks)
         db.commit()
+    nube.tracks_removed(user.id, bases)
     return {"eliminadas": len(tracks), "liberado_bytes": freed}
 
 
@@ -124,6 +127,7 @@ def rename_folder(db: Session, user: User, slug: str, nombre: str) -> dict:
                 job.updated_at = _now()
         db.commit()
 
+    nube.library_changed(user.id)
     return {"nombre": nombre, "slug": new_slug}
 
 
@@ -135,10 +139,13 @@ def delete_folder(db: Session, user: User, slug: str) -> dict:
             raise NotFound("No existe esa carpeta.")
         if any(t.status in BUSY for t in tracks):
             raise Conflict("Hay canciones de esta carpeta descargándose: espera a que terminen.")
-        freed = sum(_remove_files(db, t) for t in tracks if t.status in LISTED and not t.eliminada)
+        removed = [t for t in tracks if t.status in LISTED and not t.eliminada]
+        bases = [t.nube for t in removed if t.nube]
+        freed = sum(_remove_files(db, t) for t in removed)
         if path.is_dir() and _inside_root(path):
             shutil.rmtree(path)
         db.commit()
+    nube.tracks_removed(user.id, bases)
     return {"eliminadas": len(tracks), "liberado_bytes": freed}
 
 
@@ -225,6 +232,7 @@ def move_tracks(db: Session, user: User, track_ids: list[int], nombre: str) -> d
             track.updated_at = now
         db.commit()
 
+    nube.library_changed(user.id)
     return {"movidas": len(rows), "carpeta": {"nombre": nombre, "slug": slug}}
 
 
@@ -234,4 +242,5 @@ def set_favorite(db: Session, user: User, slug: str, favorita: bool) -> dict:
     if not path.is_dir() and not _folder_tracks(db, user, slug):
         raise NotFound("No existe esa carpeta.")
     folders.write_meta(path, favorita=bool(favorita))
+    nube.library_changed(user.id)
     return {"slug": slug, "favorita": bool(favorita)}

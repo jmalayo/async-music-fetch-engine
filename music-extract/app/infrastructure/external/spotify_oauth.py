@@ -1,5 +1,6 @@
 import secrets
 import threading
+import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -140,3 +141,35 @@ def start_authorization_flow(*, client_id: str, client_secret: str, redirect_uri
         _pending.update(thread=thread, url=url)
         thread.start()
         return url
+
+
+# --- Flujo con retorno a una ruta del motor (web publicada) -----------------------------------------------------
+# Spotify vuelve a https://<web>/api/auth/spotify/callback, que llega al motor como /auth/spotify/callback.
+_web_pending: dict[str, dict] = {}
+WEB_FLOW_TTL_S = 600
+
+
+def start_web_flow(*, client_id: str, client_secret: str, redirect_uri: str, scopes: str, on_token) -> str:
+    """URL de autorización; el canje lo hace `finish_web_flow` cuando Spotify vuelve con el mismo `state`."""
+    state = secrets.token_urlsafe(24)
+    now = time.monotonic()
+    with _pending_lock:
+        for key in [k for k, v in _web_pending.items() if now - v["at"] > WEB_FLOW_TTL_S]:
+            _web_pending.pop(key, None)
+        _web_pending[state] = {"client_id": client_id, "client_secret": client_secret, "redirect_uri": redirect_uri,
+                               "on_token": on_token, "at": now}
+    return build_authorize_url(client_id, redirect_uri, scopes, state)
+
+
+def finish_web_flow(*, state: str | None, code: str | None, error: str | None) -> None:
+    """Canjea el código por el token y lo guarda. El `state` se usa una sola vez (evita CSRF y repeticiones)."""
+    with _pending_lock:
+        flow = _web_pending.pop(state or "", None)
+    if flow is None or time.monotonic() - flow["at"] > WEB_FLOW_TTL_S:
+        raise AuthorizationDenied("La conexión con Spotify venció o no la inició owlo: vuelve a intentarlo.")
+    if error:
+        raise AuthorizationDenied(f"Spotify no autorizó la conexión ({error}).")
+    if not code:
+        raise AuthorizationDenied("Spotify no devolvió el código de autorización.")
+    flow["on_token"](exchange_code_for_token(code, client_id=flow["client_id"], client_secret=flow["client_secret"],
+                                             redirect_uri=flow["redirect_uri"]))

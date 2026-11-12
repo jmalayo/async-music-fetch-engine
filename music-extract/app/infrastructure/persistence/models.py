@@ -71,6 +71,9 @@ class Track(Base):
     recuperada = Column(Boolean, default=False, server_default="0", nullable=False)
     # Borrada de la biblioteca por el usuario: sus archivos ya no están en disco, pero la fila queda para Recientes.
     eliminada = Column(Boolean, default=False, server_default="0", nullable=False)
+    # Copia en la nube (R2): base de la clave, «v1/u/{usuario}/t/{track}-{clave}». El set va en «base.mp3» y cada
+    # tema en «base/NN.mp3». Vacía si no se subió (o la nube no está configurada).
+    nube = Column(String(255), nullable=True)
 
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat(), onupdate=datetime.now(timezone.utc).isoformat(), nullable=False)
     updated_at = Column(String, default=datetime.now(timezone.utc).isoformat(), onupdate=datetime.now(timezone.utc).isoformat(), nullable=False)

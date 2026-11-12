@@ -35,6 +35,10 @@ class SpotifyCredentials:
     client_secret: str
 
 def default_js_runtime() -> str:
+    """Deno si está (el que recomienda yt-dlp); si no, node (yt-dlp exige node 22 o más)."""
+    deno = shutil.which("deno")
+    if deno:
+        return f"deno:{deno}"
 
     node = shutil.which("node") or r"C:\Program Files\nodejs\node.exe"
 

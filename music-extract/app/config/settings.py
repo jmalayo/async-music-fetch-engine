@@ -50,12 +50,26 @@ BITRATE = "192k"
 
 ENV_PATH = MUSIC_EXTRACT_DIR / ".env"
 load_dotenv(dotenv_path=ENV_PATH)
+# El .env de la raíz del repo también vale (ahí están las llaves de R2); el de music-extract manda si se repite.
+load_dotenv(dotenv_path=MUSIC_EXTRACT_DIR.parent / ".env")
 
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 PROXY = os.getenv("PROXY")
 
-SPOTIFY_OAUTH_REDIRECT_URI = "http://127.0.0.1:8888/callback"
+# Biblioteca en la nube (Cloudflare R2, compatible con S3). Sin endpoint, bucket y llaves (o token) no se sube nada.
+R2_ENDPOINT = os.getenv("R2_ENDPOINT")
+R2_BUCKET = os.getenv("R2_BUCKET")
+R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID")
+R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY")
+# Alternativa a las dos llaves: solo el token de R2 (de él se sacan las llaves al arrancar).
+R2_TOKEN_VALUE = os.getenv("R2_TOKEN_VALUE")
+
+# Retorno de Spotify. Por defecto, un servidor local en el puerto 8888 (solo funciona desde la PC). Con la web
+# publicada, una ruta del motor detrás de la web, p. ej. https://<web>/api/auth/spotify/callback (se registra
+# igual en el panel de Spotify Developer).
+SPOTIFY_OAUTH_REDIRECT_URI = os.getenv("SPOTIFY_OAUTH_REDIRECT_URI") or "http://127.0.0.1:8888/callback"
+SPOTIFY_OAUTH_LOCAL = SPOTIFY_OAUTH_REDIRECT_URI.startswith(("http://127.0.0.1", "http://localhost"))
 SPOTIFY_OAUTH_CALLBACK_PORT = 8888
 SPOTIFY_OAUTH_SCOPES = "playlist-read-private playlist-read-collaborative"
 

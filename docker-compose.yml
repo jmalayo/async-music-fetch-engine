@@ -9,6 +9,9 @@ services:
       - "127.0.0.1:8888:8888"
     env_file:
       - music-extract/.env
+      # Llaves de R2 (opcional).
+      - path: .env
+        required: false
     volumes:
       - ./music-extract/data:/app/music-extract/data
       - ./music-extract/app/db:/app/music-extract/app/db

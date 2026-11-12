@@ -6,7 +6,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from musictools.download import audio, progress
+from musictools.download import audio, progress, ytdlp_lib
 from musictools.download.core import (
     SpotifyCredentials, default_js_runtime, download, download_song, query_variants, resolve, score_url_for, search_song,
     split_tema_title,
@@ -26,7 +26,7 @@ from config.settings import (
     ANON_RETENTION_HOURS,
 )
 from infrastructure.persistence.database import SessionLocal
-from infrastructure.persistence.models import User
+from infrastructure.persistence.models import Track, User
 from core import folders, job_service, web_jobs
 
 # Dos pools: uno para descargar (THREADS en paralelo) y otro para la vista previa, así buscar canciones
@@ -104,18 +104,21 @@ def _resolve_track(track_id: int, url: str, known_meta: dict | None, force: bool
     sin consultar YouTube ni Spotify; `force` (botón «Volver a buscar») ignora lo guardado y lo reemplaza."""
     with SessionLocal() as db:
         cached = None if force else web_jobs.cached_resolution(db, url)
+        track = db.get(Track, track_id)
+        with_account = bool(track and track.job and track.job.user_id is not None)
 
     data = cached
     if data is None:
         try:
-            data = resolve(
-                url,
-                cookies_file=COOKIES_FILE,
-                js_runtime=_js_runtime,
-                spotify_creds=_spotify_creds,
-                proxy=PROXY,
-                known_meta=known_meta,
-            )
+            with ytdlp_lib.browser_cookies_allowed(with_account):
+                data = resolve(
+                    url,
+                    cookies_file=COOKIES_FILE,
+                    js_runtime=_js_runtime,
+                    spotify_creds=_spotify_creds,
+                    proxy=PROXY,
+                    known_meta=known_meta,
+                )
         except Exception as e:  # noqa: BLE001 — cualquier error de una canción no debe frenar la vista previa
             with SessionLocal() as db:
                 web_jobs.save_resolution_error(db, track_id, f"{type(e).__name__}: {e}")
@@ -300,6 +303,7 @@ def _process_track(job_id: str, track_id: int, url: str, iteration_count: int, k
             if not web_jobs.start_round(db, track_id):
                 return
             out_dir = resolve_output_dir(db, job_id)
+            with_account = job_service.get_job(db, job_id).user_id is not None
             plan = web_jobs.download_plan(db, track_id)
 
         # Cada canción baja a su propia carpeta temporal: si se cancela o falla, se borra entera y no
@@ -308,7 +312,7 @@ def _process_track(job_id: str, track_id: int, url: str, iteration_count: int, k
         shutil.rmtree(work_dir, ignore_errors=True)
         work_dir.mkdir(parents=True)
 
-        with progress.using(reporter):
+        with progress.using(reporter), ytdlp_lib.browser_cookies_allowed(with_account):
             if plan["cortar"] and plan["temas"]:
                 reporter.set_context(etapa="set", tema_actual=None, temas=len(plan["temas"]), temas_estado=["pendiente"] * len(plan["temas"]),
                                      temas_indices=[t["index"] for t in plan["temas"]])

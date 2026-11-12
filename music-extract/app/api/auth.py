@@ -1,23 +1,35 @@
+from urllib.parse import urlparse
+
 import requests
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
 from config.settings import (
     SPOTIFY_CLIENT_ID,
     SPOTIFY_CLIENT_SECRET,
     SPOTIFY_OAUTH_CALLBACK_PORT,
+    SPOTIFY_OAUTH_LOCAL,
     SPOTIFY_OAUTH_REDIRECT_URI,
     SPOTIFY_OAUTH_SCOPES,
 )
 from api.schemas import SpotifyLoginRequest
+from core import auth as accounts
 from infrastructure.external import spotify_client, spotify_oauth
 from infrastructure.persistence.database import SessionLocal, get_db
-from infrastructure.persistence.models import SpotifyToken
+from infrastructure.persistence.models import SpotifyToken, User
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
+
+def require_admin(user: User = Depends(accounts.require_user)) -> User:
+    """La conexión con Spotify es una sola para todo el motor: solo un administrador la cambia."""
+    if not user.is_admin:
+        raise HTTPException(403, "Solo un administrador puede conectar o desconectar Spotify.")
+    return user
+
 @router.post("/spotify/login")
-def start_spotify_auth(body: SpotifyLoginRequest | None = None, db: Session = Depends(get_db)):
+def start_spotify_auth(body: SpotifyLoginRequest | None = None, db: Session = Depends(get_db), _: User = Depends(require_admin)):
     body = body or SpotifyLoginRequest()
     client_id = body.client_id or SPOTIFY_CLIENT_ID
     client_secret = body.client_secret or SPOTIFY_CLIENT_SECRET
@@ -41,7 +53,7 @@ def start_spotify_auth(body: SpotifyLoginRequest | None = None, db: Session = De
     return {"ok": True, "scope": token_data.get("scope")}
 
 @router.post("/spotify/authorize")
-def spotify_authorize(body: SpotifyLoginRequest | None = None):
+def spotify_authorize(body: SpotifyLoginRequest | None = None, _: User = Depends(require_admin)):
     """Para la web: devuelve la URL de Spotify y espera el callback en segundo plano (sin bloquear la petición).
 
     La web abre la URL en otra pestaña y consulta `/spotify/account-status` hasta que quede conectada.
@@ -56,6 +68,11 @@ def spotify_authorize(body: SpotifyLoginRequest | None = None):
         with SessionLocal() as db:
             spotify_client.save_user_token(db, token_data, client_id=client_id, client_secret=client_secret)
 
+    if not SPOTIFY_OAUTH_LOCAL:
+        url = spotify_oauth.start_web_flow(client_id=client_id, client_secret=client_secret, redirect_uri=SPOTIFY_OAUTH_REDIRECT_URI,
+                                           scopes=SPOTIFY_OAUTH_SCOPES, on_token=save)
+        return {"url": url}
+
     url = spotify_oauth.start_authorization_flow(
         client_id=client_id,
         client_secret=client_secret,
@@ -67,8 +84,22 @@ def spotify_authorize(body: SpotifyLoginRequest | None = None):
     return {"url": url}
 
 
+@router.get("/spotify/callback", include_in_schema=False)
+def spotify_callback(code: str | None = None, state: str | None = None, error: str | None = None):
+    """Spotify vuelve aquí (vía la web). Guarda el token y regresa a la web, que ya muestra «Conectado»."""
+    parsed = urlparse(SPOTIFY_OAUTH_REDIRECT_URI)
+    home = f"{parsed.scheme}://{parsed.netloc}/"
+    try:
+        spotify_oauth.finish_web_flow(state=state, code=code, error=error)
+    except spotify_oauth.AuthorizationDenied:
+        return RedirectResponse(f"{home}?spotify=error", status_code=303)
+    except requests.HTTPError:
+        return RedirectResponse(f"{home}?spotify=error", status_code=303)
+    return RedirectResponse(f"{home}?spotify=conectado", status_code=303)
+
+
 @router.post("/spotify/logout")
-def spotify_logout(db: Session = Depends(get_db)):
+def spotify_logout(db: Session = Depends(get_db), _: User = Depends(require_admin)):
     """Desconecta Spotify: borra el token guardado."""
     db.query(SpotifyToken).delete()
     db.commit()

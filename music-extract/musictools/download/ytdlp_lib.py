@@ -1,7 +1,10 @@
+import contextvars
+import os
 import re
 import time
 import yt_dlp
 
+from contextlib import contextmanager
 from pathlib import Path
 
 from . import audio, blocked_cache, progress
@@ -70,6 +73,55 @@ def _parse_js_runtime(js_runtime: str) -> dict:
 
     return {runtime.lower(): {"path": path or None}}
 
+# Cookies de un navegador para los videos que piden iniciar sesión (edad, privados): «firefox» o
+# «firefox:/ruta/al/perfil». Solo se usan al reintentar una descarga que falló por needs_auth.
+BROWSER_COOKIES = os.getenv("YTDLP_COOKIES_FROM_BROWSER") or None
+
+
+# Las cookies del navegador son de la cuenta de Google del dueño: solo se prestan a descargas de usuarios con
+# cuenta en owlo. Apagado por defecto; quien descarga lo enciende con `browser_cookies_allowed`.
+_browser_allowed = contextvars.ContextVar("browser_cookies_allowed", default=False)
+
+
+@contextmanager
+def browser_cookies_allowed(allowed: bool):
+    token = _browser_allowed.set(bool(allowed))
+    try:
+        yield
+    finally:
+        _browser_allowed.reset(token)
+
+
+def browser_cookies() -> tuple | None:
+    if not BROWSER_COOKIES:
+        return None
+    browser, _, profile = BROWSER_COOKIES.partition(":")
+    return (browser.strip().lower(), profile.strip() or None, None, None)
+
+
+def _with_browser_cookies(opts: dict) -> dict | None:
+    """Las mismas opciones, pero con las cookies del navegador en lugar del archivo. None si no hay navegador."""
+    spec = browser_cookies()
+    if spec is None or not _browser_allowed.get() or opts.get("cookiesfrombrowser"):
+        return None
+    retry = {k: v for k, v in opts.items() if k != "cookiefile"}
+    retry["cookiesfrombrowser"] = spec
+    return retry
+
+
+def _extract(opts: dict, url: str, *, download: bool):
+    """extract_info; si YouTube pide iniciar sesión y hay navegador configurado, reintenta una vez con sus cookies."""
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            return ydl, ydl.extract_info(url, download=download)
+    except yt_dlp.utils.DownloadError as e:
+        retry = _with_browser_cookies(opts) if classify_error(str(e)) == "needs_auth" else None
+        if retry is None:
+            raise
+        with yt_dlp.YoutubeDL(retry) as ydl:
+            return ydl, ydl.extract_info(url, download=download)
+
+
 def _common_opts(cookies_file: Path, js_runtime: str, proxy: str | None = None, client: str | None = None) -> dict:
 
     opts = {
@@ -119,10 +171,9 @@ def download(
 
     try:
 
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            downloads = (info or {}).get("requested_downloads") or []
-            src = Path(downloads[0]["filepath"]) if downloads and downloads[0].get("filepath") else Path(ydl.prepare_filename(info))
+        ydl, info = _extract(opts, url, download=True)
+        downloads = (info or {}).get("requested_downloads") or []
+        src = Path(downloads[0]["filepath"]) if downloads and downloads[0].get("filepath") else Path(ydl.prepare_filename(info))
 
     except yt_dlp.utils.DownloadError as e:
 
@@ -277,8 +328,7 @@ def probe_info(
     opts["skip_download"] = True
 
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+        _, info = _extract(opts, url, download=False)
 
     except yt_dlp.utils.DownloadError as e:
         return None, classify_error(str(e))

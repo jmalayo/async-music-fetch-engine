@@ -936,6 +936,10 @@ def finish_round(db: Session, track_id: int, result: dict, elapsed_s: float, fil
     job_service.record_result(
         db, track_id, 0, final, intentos, result.get("titulo"), result.get("artista"), elapsed_s, before_commit=apply_rules,
     )
+    if files and estado in ("successful", "incorrect"):
+        from core import nube
+
+        nube.track_ready(track_id)
 
 
 def mark_cancelled(db: Session, track_id: int, elapsed_s: float) -> None:

@@ -10,9 +10,12 @@ services:
       - ./music-extract/app:/app/music-extract/app
       - ./music-extract/musictools:/app/music-extract/musictools
       - ./music-extract/scripts:/app/music-extract/scripts
+      # Perfil de Firefox (solo lectura): sus cookies se usan cuando un video pide iniciar sesión.
+      - ${HOME}/.mozilla/firefox:/firefox:ro
     environment:
       # Sin archivos __pycache__ del contenedor (que serían de root) en la carpeta del proyecto.
       PYTHONDONTWRITEBYTECODE: "1"
+      YTDLP_COOKIES_FROM_BROWSER: "firefox:/firefox/695bhfvm.default-release"
     # Al reiniciarse por un cambio, las descargas en curso vuelven a la cola sin gastar intento
     # (resume_after_restart en main.py).
     command:

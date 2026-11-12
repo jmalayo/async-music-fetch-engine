@@ -41,6 +41,29 @@ El archivo `cookies.txt`, al ser un recurso compartido entre workers de descarga
 
 La sesión expira con el tiempo; no hay renovación automática, así que hay que repetir estos pasos periódicamente.
 
+### Biblioteca en la nube (Cloudflare R2, opcional)
+
+Con estas variables en `music-extract/.env` o en el `.env` de la raíz, cada canción descargada con cuenta se sube también a R2 (`app/core/nube.py`). Sin ellas no se sube nada.
+
+```
+R2_ENDPOINT=https://<id-de-cuenta>.r2.cloudflarestorage.com
+R2_BUCKET=audio-fetch-downloader
+R2_ACCESS_KEY_ID=...
+R2_SECRET_ACCESS_KEY=...
+# o, en lugar de las dos llaves, solo el token de R2:
+# R2_TOKEN_VALUE=...
+```
+
+Las claves son por identificador, no por nombre: renombrar o mover carpetas solo reescribe `biblioteca.json`.
+
+```
+v1/u/{id_usuario}/t/{id_cancion}-{clave}.mp3      canción entera o set completo
+v1/u/{id_usuario}/t/{id_cancion}-{clave}/NN.mp3   temas del tracklist
+v1/u/{id_usuario}/biblioteca.json                 carpetas, nombres y claves
+```
+
+Borrar en la biblioteca borra también en R2. Al arrancar, el motor sube lo que falte (canciones anteriores o subidas que fallaron).
+
 ### Arquitectura de Base de datos
 
 SQLite, con el schema administrado por SQLAlchemy y las migraciones por Alembic. Se crea y actualiza automaticamente al levantar el API. 

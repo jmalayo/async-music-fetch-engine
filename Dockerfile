@@ -3,6 +3,8 @@ FROM python:3.11-slim
 # ffmpeg  -> audio normalization (loudnorm, two-pass LUFS/peak)
 # nodejs  -> JS runtime yt-dlp needs to solve YouTube's player challenges
 # curl/ca-certificates -> required by the Playwright browser installer below
+# deno    -> JS runtime yt-dlp recommends for YouTube's challenges (Debian's nodejs is v20, below the v22 yt-dlp needs)
+COPY --from=denoland/deno:bin-2.9.8 /deno /usr/local/bin/deno
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         nodejs \

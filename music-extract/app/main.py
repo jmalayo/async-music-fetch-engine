@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from config.settings import WEB_ORIGINS
 from infrastructure.persistence.database import init_db
 from infrastructure.external import downloader_service
+from core import nube
 from api import downloads, stages, auth, jobs, folders, session, library, links
 
 @asynccontextmanager
@@ -17,6 +18,8 @@ async def lifespan(app: FastAPI):
     init_db()
     # Lo que quedó a medias por un reinicio (descargas y vistas previas) vuelve a la cola.
     downloader_service.resume_after_restart()
+    # Lo que falta subir a la nube (R2), si está configurada.
+    nube.sync_pending()
     yield
 
 app = FastAPI(title="music-extract API", lifespan=lifespan)

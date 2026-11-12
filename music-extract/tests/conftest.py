@@ -19,6 +19,9 @@ os.environ["MUSIC_DOWNLOADED_ROOT"] = str(_TMP / "music-downloaded")
 os.environ.setdefault("SPOTIFY_CLIENT_ID", "test")
 os.environ.setdefault("SPOTIFY_CLIENT_SECRET", "test")
 os.environ["OWLO_SECRET_KEY"] = "clave-de-prueba"
+# Nunca la nube real: vacías antes de leer los .env (load_dotenv no pisa lo que ya está definido).
+for _var in ("R2_ENDPOINT", "R2_BUCKET", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_TOKEN_VALUE"):
+    os.environ[_var] = ""
 
 APP_DIR = Path(__file__).resolve().parent.parent / "app"
 sys.path.insert(0, str(APP_DIR))
@@ -40,7 +43,7 @@ def client():
 
     with TestClient(main.app) as c:
         with SessionLocal() as db:
-            auth.create_user(db, *TEST_USER)
+            auth.create_user(db, *TEST_USER, is_admin=True)  # admin: puede conectar Spotify
         r = c.post("/auth/login", json={"username": TEST_USER[0], "password": TEST_USER[1]})
         assert r.status_code == 200, r.text
         yield c
