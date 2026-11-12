@@ -19,8 +19,10 @@ os.environ["MUSIC_DOWNLOADED_ROOT"] = str(_TMP / "music-downloaded")
 os.environ.setdefault("SPOTIFY_CLIENT_ID", "test")
 os.environ.setdefault("SPOTIFY_CLIENT_SECRET", "test")
 os.environ["OWLO_SECRET_KEY"] = "clave-de-prueba"
-# Nunca la nube real: vacías antes de leer los .env (load_dotenv no pisa lo que ya está definido).
-for _var in ("R2_ENDPOINT", "R2_BUCKET", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_TOKEN_VALUE"):
+# Nunca la configuración real (nube, retorno de Spotify, cookies del navegador): vacías antes de leer los .env
+# (load_dotenv no pisa lo que ya está definido).
+for _var in ("R2_ENDPOINT", "R2_BUCKET", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_TOKEN_VALUE",
+             "SPOTIFY_OAUTH_REDIRECT_URI", "YTDLP_COOKIES_FROM_BROWSER"):
     os.environ[_var] = ""
 
 APP_DIR = Path(__file__).resolve().parent.parent / "app"
