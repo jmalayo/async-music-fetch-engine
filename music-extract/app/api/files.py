@@ -11,7 +11,7 @@ import zipfile
 from pathlib import Path
 
 from fastapi import HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
@@ -80,7 +80,28 @@ def _cut(track: Track) -> bool:
 
 def serve_tracks(db: Session, tracks: list[Track], *, name: str, force_zip: bool = False, modo: str | None = None):
     """Un mix cortado por tracklist se entrega por partes (un ZIP con sus temas, no el audio completo), porque eso
-    es lo que pidió el usuario; `modo="entero"` entrega el MP3 completo, si se guardó."""
+    es lo que pidió el usuario; `modo="entero"` entrega el MP3 completo, si se guardó.
+
+    Si la canción está en la nube (R2), un MP3 suelto se entrega con un enlace temporal directo a R2 (más rápido que
+    pasar por la PC); para un ZIP se traen de R2 los archivos que ya no estén en disco y se borran al terminar."""
+    from core import nube
+
+    if len(tracks) == 1 and not force_zip and nube.has_main(tracks[0]) and (modo == "entero" or (modo is None and not _cut(tracks[0]))):
+        tracks[0].descargas = (tracks[0].descargas or 0) + 1
+        db.commit()
+        return RedirectResponse(nube.presigned_url(nube.main_key(tracks[0].nube)), status_code=307)
+
+    fetched = nube.hydrate(tracks)
+    try:
+        return _serve_local(db, tracks, name=name, force_zip=force_zip, modo=modo, fetched=fetched)
+    except BaseException:
+        nube.discard(fetched)
+        raise
+
+
+def _serve_local(db: Session, tracks: list[Track], *, name: str, force_zip: bool, modo: str | None, fetched: list[Path]):
+    from core import nube
+
     found = [(t, p) for t in tracks if (p := _path(t)) is not None]
     if modo != "entero":
         found = [(t, (parts_dir(t, p) or p) if _cut(t) else p) for t, p in found]
@@ -103,7 +124,7 @@ def serve_tracks(db: Session, tracks: list[Track], *, name: str, force_zip: bool
     # Una sola canción con su MP3: se entrega tal cual.
     if not force_zip and len(found) == 1 and found[0][1].is_file():
         path = found[0][1]
-        return FileResponse(path, media_type="audio/mpeg", filename=path.name)
+        return FileResponse(path, media_type="audio/mpeg", filename=path.name, background=BackgroundTask(nube.discard, fetched))
 
     fd, tmp = tempfile.mkstemp(suffix=".zip")
     os.close(fd)
@@ -129,4 +150,8 @@ def serve_tracks(db: Session, tracks: list[Track], *, name: str, force_zip: bool
                 used.add(arcname)
                 archive.write(entry, arcname)
 
-    return FileResponse(tmp, media_type="application/zip", filename=f"{_safe(name)}.zip", background=BackgroundTask(os.remove, tmp))
+    def cleanup():
+        os.remove(tmp)
+        nube.discard(fetched)
+
+    return FileResponse(tmp, media_type="application/zip", filename=f"{_safe(name)}.zip", background=BackgroundTask(cleanup))

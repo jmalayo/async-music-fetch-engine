@@ -162,8 +162,13 @@ def covers_request(prior: Track, tracklist: dict | None) -> bool:
 
 
 def _file_exists(track: Track) -> bool:
+    """El archivo está en disco o en la nube (R2)."""
     if not track.archivo:
         return False
+    from core import nube
+
+    if nube.in_cloud(track):
+        return True
     path = Path(track.archivo)
     return (path if path.is_absolute() else MUSIC_DOWNLOADED_ROOT / path).exists()
 
@@ -210,7 +215,9 @@ def _previously_downloaded(db: Session, urls: list[str], user_id: int | None, tr
 
 
 def _temas_on_disk(priors: list[Track]) -> set[int]:
-    return {i for p in priors for i, path in tema_files(p).items() if path.exists()}
+    from core import nube
+
+    return {i for p in priors for i, path in tema_files(p).items() if nube.in_cloud(p) or path.exists()}
 
 
 def downloaded_temas(db: Session, track: Track) -> set[int]:
@@ -385,7 +392,10 @@ def _downloaded_url(track: Track) -> str | None:
 
 def _tracklist_payload(track: Track, tracklist: dict | None, chapters: list[dict], excluded: set[int]) -> dict:
     options = tracklist or {}
-    files = {i: p for i, p in tema_files(track).items() if p.exists()}
+    from core import nube
+
+    in_cloud = nube.in_cloud(track)
+    files = {i: p for i, p in tema_files(track).items() if in_cloud or p.exists()}
     fuentes = options.get("fuentes") or {}
     urls = options.get("urls") or {}
     ya: set[int] = set()

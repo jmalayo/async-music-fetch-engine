@@ -258,8 +258,14 @@ def track_file(track_id: int, modo: Literal["entero", "partes"] | None = None, t
         raise HTTPException(404, "No existe la canción.")
     _handle(lambda: web_jobs.check_owner(db, track.job_id, user))
     if tema is not None:
-        from fastapi.responses import FileResponse
+        from fastapi.responses import FileResponse, RedirectResponse
 
+        from core import nube
+
+        if nube.in_cloud(track) and tema in web_jobs.tema_files(track):
+            track.descargas = (track.descargas or 0) + 1
+            db.commit()
+            return RedirectResponse(nube.presigned_url(nube.tema_key(track.nube, tema)), status_code=307)
         path = files.tema_file(track, tema)
         track.descargas = (track.descargas or 0) + 1
         db.commit()

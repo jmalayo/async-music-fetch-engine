@@ -14,6 +14,7 @@ falla, la canción queda sin `nube` y se reintenta al arrancar el motor (`sync_p
 
 import json
 import logging
+import os
 import secrets
 import string
 import threading
@@ -217,6 +218,11 @@ def _upload_track(track_id: int, publish: bool = True) -> None:
             db.commit()
     if stale:
         _delete_prefix(stale)
+    if not keep_local():
+        with SessionLocal() as db:
+            track = db.get(Track, track_id)
+            if track is not None and track.nube == base:
+                free_local(track)
     if publish:
         _publish_manifest(user_id)
 
@@ -312,3 +318,84 @@ def _sync_all() -> None:
             log.exception("Nube: no se pudo subir la canción %s", track_id)
     for user_id in users:
         _publish_manifest(user_id)
+
+
+# --- La nube como fuente: entregar desde R2 y liberar el disco local ------------------------------------------
+
+def in_cloud(track: Track) -> bool:
+    return bool(track.nube) and enabled()
+
+
+def presigned_url(key: str, expires_s: int = 900) -> str:
+    """Enlace temporal de descarga directa desde R2 (el nombre del archivo ya va en su Content-Disposition)."""
+    return _s3().generate_presigned_url("get_object", Params={"Bucket": bucket(), "Key": key}, ExpiresIn=expires_s)
+
+
+def has_main(track: Track) -> bool:
+    """Si la canción tiene el audio entero en R2 (los tracklists guardados solo por partes no lo tienen)."""
+    return in_cloud(track) and str(track.archivo or "").lower().endswith(".mp3")
+
+
+def hydrate(tracks: list[Track]) -> list[Path]:
+    """Trae de R2 los archivos que ya no están en disco (para armar un ZIP). Devuelve los que bajó, para borrarlos
+    después de entregar."""
+    from core import web_jobs
+
+    created: list[Path] = []
+    for track in tracks:
+        if not in_cloud(track):
+            continue
+        wanted = []
+        main = _local(track.archivo)
+        if main is not None and has_main(track) and not main.exists():
+            wanted.append((main_key(track.nube), main))
+        wanted += [(tema_key(track.nube, i), p) for i, p in web_jobs.tema_files(track).items() if not p.exists()]
+        for key, path in wanted:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _s3().download_file(bucket(), key, str(path))
+            created.append(path)
+    return created
+
+
+def discard(paths: list[Path]) -> None:
+    """Borra los archivos traídos con `hydrate` (y las carpetas de temas que queden vacías)."""
+    for path in paths:
+        path.unlink(missing_ok=True)
+        parent = path.parent
+        if parent != settings.MUSIC_DOWNLOADED_ROOT and parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+
+
+def free_local(track: Track) -> int:
+    """Borra del disco la copia local de una canción que ya está en R2, solo si cada archivo está en R2 con el
+    mismo tamaño. Devuelve los bytes liberados (0 si no se pudo comprobar)."""
+    from core import web_jobs
+
+    if not in_cloud(track):
+        return 0
+    pairs = []
+    main = _local(track.archivo)
+    if main is not None and main.is_file():
+        pairs.append((main_key(track.nube), main))
+    pairs += [(tema_key(track.nube, i), p) for i, p in web_jobs.tema_files(track).items() if p.is_file()]
+    s3 = _s3()
+    for key, path in pairs:
+        try:
+            remote = s3.head_object(Bucket=bucket(), Key=key)["ContentLength"]
+        except Exception:  # noqa: BLE001 — si no está o no se puede comprobar, no se borra nada
+            return 0
+        if remote != path.stat().st_size:
+            return 0
+    freed = 0
+    for _, path in pairs:
+        freed += path.stat().st_size
+        path.unlink()
+        parent = path.parent
+        if parent.is_dir() and not any(parent.iterdir()) and not (parent / ".owlo-carpeta.json").exists():
+            parent.rmdir()
+    return freed
+
+
+def keep_local() -> bool:
+    """Con NUBE_SIN_COPIA_LOCAL=1, la copia en disco se borra en cuanto la canción queda en R2."""
+    return os.getenv("NUBE_SIN_COPIA_LOCAL", "").strip().lower() not in ("1", "true", "si", "sí")

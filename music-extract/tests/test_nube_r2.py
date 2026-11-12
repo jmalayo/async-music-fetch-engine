@@ -32,6 +32,18 @@ class FakeR2:
         for obj in Delete["Objects"]:
             self.objects.pop(obj["Key"], None)
 
+    def generate_presigned_url(self, op, Params, ExpiresIn):
+        return f"https://r2.example/{Params['Key']}?firma=x&expira={ExpiresIn}"
+
+    def head_object(self, Bucket, Key):
+        if Key not in self.objects:
+            raise KeyError(Key)
+        return {"ContentLength": len(self.objects[Key]["body"])}
+
+    def download_file(self, bucket, key, filename):
+        with open(filename, "wb") as f:
+            f.write(self.objects[key]["body"])
+
     def mp3s(self):
         return sorted(k for k in self.objects if k.endswith(".mp3"))
 
@@ -197,3 +209,95 @@ def test_llaves_desde_el_token_de_r2(monkeypatch):
     assert key_id == "id-del-token"
     assert secret == hashlib.sha256(b"mi-token").hexdigest()
     assert [c[1] for c in calls] == ["Bearer mi-token", "Bearer mi-token"]
+
+
+
+# --- Solo en la nube: R2 como fuente y sin copia local ---------------------------------------------------------
+
+@pytest.fixture
+def solo_nube(r2, monkeypatch):
+    monkeypatch.setenv("NUBE_SIN_COPIA_LOCAL", "1")
+    return r2
+
+
+def local_mp3s(root, slug):
+    return sorted(p.name for p in (root / "prueba" / slug).rglob("*.mp3"))
+
+
+def test_solo_nube_borra_la_copia_local_y_entrega_desde_r2(client, fake_engine, solo_nube, downloads_root):
+    track = downloaded(client, "Solo Nube", tag="snube")
+    synced(solo_nube)
+    assert local_mp3s(downloads_root, "solo_nube") == []  # ya no ocupa disco
+    key = next(k for k in solo_nube.mp3s() if f"/t/{track['track_id']}-" in k)
+
+    # Bajar: redirige a un enlace temporal de R2.
+    r = client.get(f"/tracks/{track['track_id']}/file", follow_redirects=False)
+    assert r.status_code == 307 and r.headers["location"].startswith(f"https://r2.example/{key}?")
+
+    # Sigue en la biblioteca, cuenta en el selector de carpetas y como «ya descargada».
+    assert [t["track_id"] for t in client.get("/library/folders/solo_nube").json()["tracks"]] == [track["track_id"]]
+    picker = {c["slug"]: c for c in client.get("/folders").json()["carpetas"]}
+    assert picker["solo_nube"]["canciones"] == 1
+    job_id = create_youtube(client, [track["url"]], carpeta="Solo Nube")
+    assert preview_ready(client, job_id)["tracks"][0]["ya_descargada"] is True
+
+    # El ZIP de la carpeta trae el archivo de R2 y lo vuelve a borrar al terminar.
+    r = client.get("/library/folders/solo_nube/zip")
+    assert r.status_code == 200 and r.headers["content-type"] == "application/zip"
+    assert local_mp3s(downloads_root, "solo_nube") == []
+
+
+def test_solo_nube_tracklist_temas_y_zip(client, fake_engine, solo_nube, downloads_root):
+    import io
+    import zipfile
+
+    url = yt("snmix")
+    fake_engine.behavior[f"{url}#seconds"] = 6.0
+    fake_engine.resolved[url] = {
+        "origen": "youtube", "title": "Mix solo nube", "artist": "DJ", "duration_s": 6, "disponible": True, "motivo": None, "candidatos": [],
+        "chapters": [{"inicio_s": 0, "fin_s": 3, "titulo": "Uno"}, {"inicio_s": 3, "fin_s": None, "titulo": "Dos"}],
+    }
+    job_id = create_youtube(client, [url], carpeta="Solo Sets", tracklist={"cortar": True})
+    track = preview_ready(client, job_id)["tracks"][0]
+    client.post(f"/jobs/{job_id}/confirm")
+    settled(client, job_id, track["track_id"], {"successful"})
+    synced(solo_nube)
+    assert local_mp3s(downloads_root, "solo_sets") == []
+
+    r = client.get(f"/tracks/{track['track_id']}/file?tema=1", follow_redirects=False)
+    assert r.status_code == 307 and "/02.mp3?" in r.headers["location"]
+
+    r = client.get(f"/tracks/{track['track_id']}/file?modo=partes")
+    assert r.status_code == 200
+    names = sorted(zipfile.ZipFile(io.BytesIO(r.content)).namelist())
+    assert [n.split("/")[-1] for n in names] == ["01 - Uno.mp3", "02 - Dos.mp3"]
+    assert local_mp3s(downloads_root, "solo_sets") == []
+
+    # La vista del trabajo sigue mostrando los temas como guardados.
+    recent = next(t for t in client.get("/tracks/recent?limit=200").json()["items"] if t["track_id"] == track["track_id"])
+    assert recent["archivo_disponible"] is True
+
+
+def test_solo_nube_mover_y_borrar(client, fake_engine, solo_nube, downloads_root):
+    track = downloaded(client, "Nube Mover", tag="snmov")
+    before = synced(solo_nube).mp3s()
+    assert client.post("/library/tracks/move", json={"track_ids": [track["track_id"]], "carpeta": "Nube Movida"}).status_code == 200
+    assert synced(solo_nube).mp3s() == before
+    assert client.get(f"/tracks/{track['track_id']}/file", follow_redirects=False).status_code == 307
+
+    assert client.post("/library/tracks/delete", json={"track_ids": [track["track_id"]]}).status_code == 200
+    assert not [k for k in synced(solo_nube).mp3s() if f"/t/{track['track_id']}-" in k]
+    assert client.get(f"/tracks/{track['track_id']}/file", follow_redirects=False).status_code == 404
+
+
+def test_no_borra_la_copia_local_si_r2_no_la_tiene_completa(client, fake_engine, r2, downloads_root):
+    from core import nube
+    from infrastructure.persistence.database import SessionLocal
+    from infrastructure.persistence.models import Track
+
+    track = downloaded(client, "Nube Incompleta", tag="sninc")
+    key = next(k for k in synced(r2).mp3s() if f"/t/{track['track_id']}-" in k)
+    r2.objects[key]["body"] = b"recortado"  # en R2 quedó distinto
+    with SessionLocal() as db:
+        assert nube.free_local(db.get(Track, track["track_id"])) == 0
+    assert local_mp3s(downloads_root, "nube_incompleta") == ["Canal - Video.mp3"]

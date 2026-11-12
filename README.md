@@ -64,6 +64,8 @@ v1/u/{id_usuario}/biblioteca.json                 carpetas, nombres y claves
 
 Borrar en la biblioteca borra también en R2. Al arrancar, el motor sube lo que falte (canciones anteriores o subidas que fallaron).
 
+Con `NUBE_SIN_COPIA_LOCAL=1`, R2 pasa a ser la fuente: la copia en disco se borra en cuanto la canción queda subida y comprobada (mismo tamaño en R2). Las descargas de un MP3 redirigen a un enlace temporal de R2; los ZIP traen de R2 lo que falte y lo borran al terminar.
+
 ### Arquitectura de Base de datos
 
 SQLite, con el schema administrado por SQLAlchemy y las migraciones por Alembic. Se crea y actualiza automaticamente al levantar el API. 

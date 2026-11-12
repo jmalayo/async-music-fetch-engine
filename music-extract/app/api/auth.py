@@ -23,9 +23,10 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 
 def require_admin(user: User = Depends(accounts.require_user)) -> User:
-    """La conexión con Spotify es una sola para todo el motor: solo un administrador la cambia."""
+    
     if not user.is_admin:
         raise HTTPException(403, "Solo un administrador puede conectar o desconectar Spotify.")
+
     return user
 
 @router.post("/spotify/login")
