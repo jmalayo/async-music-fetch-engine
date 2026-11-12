@@ -167,7 +167,7 @@ def _search_temas(chapters: list[dict], total_s: float | None) -> list[dict]:
             fin = chapters[i + 1].get("inicio_s") if i + 1 < len(chapters) else total_s
         duracion = (fin - (chapter.get("inicio_s") or 0)) if fin else None
         try:
-            candidatos = search_song(artista, cancion, duracion, cookies_file=COOKIES_FILE, js_runtime=_js_runtime, proxy=PROXY)
+            candidatos = search_song(artista, cancion, duracion, cookies_file=COOKIES_FILE, js_runtime=_js_runtime, proxy=PROXY, tema=True)
         except Exception:  # noqa: BLE001 — sin búsqueda, el tema se corta del set
             candidatos = []
         return {**chapter, "artista": artista, "cancion": cancion, "candidatos": candidatos}

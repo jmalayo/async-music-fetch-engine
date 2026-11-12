@@ -21,18 +21,29 @@ def _norm(s: str) -> str:
 
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", s)).strip()
 
-def score(candidate: dict, artist: str, title: str, duration_s: float) -> float:
+def score(candidate: dict, artist: str, title: str, duration_s: float, *, tema: bool = False) -> float:
+    """Puntaje de un video para una canción (máximo 150).
+
+    `tema=True` es un tema de un tracklist: su duración es lo que dura el tramo en el set (los mixes suelen
+    recortar las canciones), así que una canción más larga no se castiga; y si el capítulo no trae artista,
+    el título pesa por los dos (no se restan los puntos de un artista que no se conoce)."""
 
     norm_title = _norm(title)
     norm_cand_title = _norm(candidate.get("title") or "")
     channel = (candidate.get("channel") or "").lower()
 
-    s = 0.5 * fuzz.token_set_ratio(norm_title, norm_cand_title)
-    s += 0.3 * fuzz.partial_ratio(_norm(artist), f"{norm_cand_title} {_norm(channel)}")
+    if tema and not _norm(artist):
+        s = 0.8 * fuzz.token_set_ratio(norm_title, norm_cand_title)
+    else:
+        s = 0.5 * fuzz.token_set_ratio(norm_title, norm_cand_title)
+        s += 0.3 * fuzz.partial_ratio(_norm(artist), f"{norm_cand_title} {_norm(channel)}")
 
     duration = candidate.get("duration")
     if duration is None:
         s -= 5
+    elif tema and duration >= duration_s - 5:
+        # Tan largo como el tramo o más: lo normal para la canción completa de un tema recortado en el set.
+        s += 10
     else:
         delta = abs(duration - duration_s)
         if delta <= 2:
@@ -54,8 +65,8 @@ def score(candidate: dict, artist: str, title: str, duration_s: float) -> float:
 
     return s
 
-def rank(candidates: list[dict], artist: str, title: str, duration_s: float, top_n: int = 5) -> list[dict]:
-    scored = [(score(c, artist, title, duration_s), c) for c in candidates]
+def rank(candidates: list[dict], artist: str, title: str, duration_s: float, top_n: int = 5, *, tema: bool = False) -> list[dict]:
+    scored = [(score(c, artist, title, duration_s, tema=tema), c) for c in candidates]
     scored.sort(key=lambda pair: pair[0], reverse=True)
 
     top = []

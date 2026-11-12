@@ -6,7 +6,6 @@ from sqlalchemy.orm import relationship
 from infrastructure.persistence.database import Base
 
 class User(Base):
-    """Usuario de la web. No hay registro: las cuentas se crean con scripts/create_user.py."""
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -15,8 +14,7 @@ class User(Base):
     quota_bytes = Column(Integer, nullable=False)
     is_admin = Column(Boolean, default=False, server_default="0", nullable=False)
     created_at = Column(String, nullable=False)
-
-
+    
 class Job(Base):
     __tablename__ = "jobs"
 

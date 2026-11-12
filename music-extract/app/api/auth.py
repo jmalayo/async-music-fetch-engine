@@ -21,9 +21,8 @@ from infrastructure.persistence.models import SpotifyToken, User
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
-
 def require_admin(user: User = Depends(accounts.require_user)) -> User:
-    
+
     if not user.is_admin:
         raise HTTPException(403, "Solo un administrador puede conectar o desconectar Spotify.")
 

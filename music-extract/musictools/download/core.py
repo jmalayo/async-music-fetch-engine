@@ -577,9 +577,13 @@ _TEMA_PREFIX = re.compile(r"^\s*(?:\(?\d{1,3}[.):\-]\)?\s+|\d{1,2}:\d{2}(?::\d{2
 _TEMA_SEP = re.compile(r"\s+[-–—]\s+")
 
 
+_TEMA_YEAR = re.compile(r"\s*[\(\[]\s*(?:19|20)\d{2}\s*[\)\]]")
+
+
 def split_tema_title(text: str) -> tuple[str, str]:
-    """«01. Artista - Canción» → ("Artista", "Canción"). Sin separador, el artista queda vacío."""
-    clean = _TEMA_PREFIX.sub("", text or "").strip()
+    """«01. Artista - Canción (1983)» → ("Artista", "Canción"). Sin separador, el artista queda vacío. El año entre
+    paréntesis se quita: no es parte del nombre y ensucia la búsqueda."""
+    clean = _TEMA_YEAR.sub("", _TEMA_PREFIX.sub("", text or "")).strip()
     parts = _TEMA_SEP.split(clean, maxsplit=1)
     return (parts[0].strip(), parts[1].strip()) if len(parts) == 2 else ("", clean)
 
@@ -605,13 +609,15 @@ def search_song(
     proxy: str | None = None,
     top_n: int = 5,
     query: str | None = None,
+    tema: bool = False,
 ) -> list[dict]:
     """Busca una canción en YouTube (como con Spotify) y devuelve los `top_n` candidatos puntuados. `query` cambia la
-    frase de búsqueda; el score se sigue calculando contra `artist` y `title`."""
+    frase de búsqueda; el score se sigue calculando contra `artist` y `title`. `tema=True`: es un tema de un
+    tracklist (ver `candidate_scoring.score`)."""
     js_runtime = js_runtime or default_js_runtime()
     with _private_cookies_copy(cookies_file) as private_cookies:
         found = gather_candidates(query or f"{artist} {title}".strip(), cookies_file=private_cookies, js_runtime=js_runtime, proxy=proxy)
-    return [_public_candidate(c) for c in rank(found, artist, title, duration_s or 0, top_n=top_n)] if found else []
+    return [_public_candidate(c) for c in rank(found, artist, title, duration_s or 0, top_n=top_n, tema=tema)] if found else []
 
 
 def download_song(

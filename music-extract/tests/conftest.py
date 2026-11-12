@@ -22,7 +22,7 @@ os.environ["OWLO_SECRET_KEY"] = "clave-de-prueba"
 # Nunca la configuración real (nube, retorno de Spotify, cookies del navegador): vacías antes de leer los .env
 # (load_dotenv no pisa lo que ya está definido).
 for _var in ("R2_ENDPOINT", "R2_BUCKET", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_TOKEN_VALUE",
-             "SPOTIFY_OAUTH_REDIRECT_URI", "YTDLP_COOKIES_FROM_BROWSER"):
+             "SPOTIFY_OAUTH_REDIRECT_URI", "YTDLP_COOKIES_FROM_BROWSER", "NUBE_SIN_COPIA_LOCAL"):
     os.environ[_var] = ""
 
 APP_DIR = Path(__file__).resolve().parent.parent / "app"
