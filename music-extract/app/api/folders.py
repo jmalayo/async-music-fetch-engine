@@ -24,10 +24,17 @@ def list_folders(q: str | None = None, db: Session = Depends(get_db), user: User
             .filter(Job.user_id == user.id, Track.status.in_(("successful", "incorrect")), Track.eliminada.is_(False),
                     Track.ya_descargada.is_(False), Track.archivo.isnot(None)).all())
     counts: dict[str, int] = {}
+    names: dict[str, str] = {}
     for (carpeta,) in rows:
         slug = job_service.slugify(carpeta or folders.DEFAULT_FOLDER)
         counts[slug] = counts.get(slug, 0) + 1
-    carpetas = [{**f, "canciones": counts.get(f["slug"], 0)} for f in folders.list_folders(folders.user_root(user.username), q)]
+        names.setdefault(slug, carpeta or folders.DEFAULT_FOLDER)
+    root = folders.user_root(user.username)
+    # Una carpeta sin nombre guardado (se perdió con el disco temporal) recupera el que el usuario escribió en sus
+    # trabajos, y queda guardado.
+    for slug, nombre in names.items():
+        folders.remember_name(root / slug, nombre)
+    carpetas = [{**f, "canciones": counts.get(f["slug"], 0)} for f in folders.list_folders(root, q)]
     return {"por_defecto": folders.DEFAULT_FOLDER, "carpetas": carpetas}
 
 

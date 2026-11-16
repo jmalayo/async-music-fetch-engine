@@ -136,7 +136,9 @@ def remember_name(path: Path, nombre: str, db: Session | None = None) -> None:
     """Guarda el nombre visible de la carpeta, si todavía no tiene uno."""
     if _key(path) in _named:
         return
-    if not read_meta(path, db).get("nombre"):
+    saved = read_meta(path, db).get("nombre")
+    # Sin nombre, o con el que se arma del nombre en disco («canciones sueltas»): se guarda el que escribió el usuario.
+    if not saved or (saved == path.name.replace("_", " ") and nombre != saved):
         write_meta(path, db=db, nombre=nombre)
     _named.add(_key(path))
 
