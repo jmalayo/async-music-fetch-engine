@@ -7,7 +7,7 @@ Estados de un trabajo:
     resolving → preview → in_progress → completed | completed_with_errors | cancelled
 
 Regla de intentos (plan del front §6.9): cada ronda de descarga suma 1 a `rondas_usadas`; bajar bien o
-cambiar la URL lo deja en 0; cancelar y las cookies vencidas (`needs_auth`) no suman. Tope: MAX_RETRIES_PER_TRACK.
+cambiar la URL lo deja en 0; cancelar y las cookies vencidas (`needs_auth`) no suman. Tope: settings.MAX_RETRIES_PER_TRACK.
 """
 
 import json
@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session, object_session
 
-from config.settings import MAX_RETRIES_PER_TRACK, MUSIC_DOWNLOADED_ROOT, RESOLVE_CACHE_DAYS, THREADS
+from config.settings import settings
 from core import job_service
 from core.folders import DEFAULT_FOLDER
 from core.job_service import _lock, _now, calculate_max_attempts
@@ -145,7 +145,7 @@ MIN_TEMA_SCORE = 60  # por debajo, el tema no se baja de su video: se corta del 
 def tema_files(track: Track) -> dict[int, Path]:
     """Los MP3 de los temas que bajó esta canción: índice del tema en el tracklist → ruta en disco."""
     archivos = (_loads(track.tracklist, {}) or {}).get("archivos") or {}
-    return {int(k): MUSIC_DOWNLOADED_ROOT / v for k, v in archivos.items()}
+    return {int(k): settings.MUSIC_DOWNLOADED_ROOT / v for k, v in archivos.items()}
 
 
 def saved_modes(track: Track) -> dict:
@@ -170,7 +170,7 @@ def _file_exists(track: Track) -> bool:
     if nube.in_cloud(track):
         return True
     path = Path(track.archivo)
-    return (path if path.is_absolute() else MUSIC_DOWNLOADED_ROOT / path).exists()
+    return (path if path.is_absolute() else settings.MUSIC_DOWNLOADED_ROOT / path).exists()
 
 
 def _previously_downloaded(db: Session, urls: list[str], user_id: int | None, tracklist: dict | None = None,
@@ -239,14 +239,9 @@ def downloaded_temas(db: Session, track: Track) -> set[int]:
 # --- Búsquedas guardadas (tabla busquedas) ---------------------------------------------------------------------
 
 def cached_resolution(db: Session, url: str) -> dict | None:
-    """Lo que ya se encontró para este enlace, si se buscó hace menos de RESOLVE_CACHE_DAYS días."""
+    """Lo que ya se encontró para este enlace. No vence: «Volver a buscar» lo reemplaza."""
     row = db.get(Busqueda, url)
-    if row is None:
-        return None
-    age = datetime.now(timezone.utc) - datetime.fromisoformat(row.updated_at)
-    if age.total_seconds() > RESOLVE_CACHE_DAYS * 86400:
-        return None
-    return _loads(row.datos, None)
+    return _loads(row.datos, None) if row else None
 
 
 def store_resolution(db: Session, url: str, data: dict) -> None:
@@ -472,7 +467,7 @@ def track_payload(track: Track, progreso: dict | None = None) -> dict:
         "candidatos": len(preview.get("candidatos") or []) if origen == "spotify" else None,
         "tracklist": None if origen == "spotify" else _tracklist_payload(track, tracklist, chapters, excluded),
         "rondas_usadas": track.rondas_usadas or 0,
-        "max_rondas": MAX_RETRIES_PER_TRACK,
+        "max_rondas": settings.MAX_RETRIES_PER_TRACK,
         "progreso": progreso if track.status in ("in_progress", "cancelling") else None,
         "motivo": track.motivo,
         "message": last.message if last else None,
@@ -550,11 +545,11 @@ def summary(db: Session, job: Job) -> dict:
         "cancelada": count("cancelada"),
         "rechazada": count("rechazada"),
         "pending": pending,
-        # Con THREADS descargas en paralelo, el tiempo por canción efectivo es el promedio dividido por THREADS.
-        "average_time_per_track_s": round(average / THREADS, 1) if average else None,
-        "estimated_remaining_time_s": round(average * pending / THREADS, 1) if average else None,
-        # Descargas que corren a la vez (THREADS en config/settings.py).
-        "en_paralelo": THREADS,
+        # Con settings.PROCESSING_THREADS descargas en paralelo, el tiempo por canción efectivo es el promedio dividido por settings.PROCESSING_THREADS.
+        "average_time_per_track_s": round(average / settings.PROCESSING_THREADS, 1) if average else None,
+        "estimated_remaining_time_s": round(average * pending / settings.PROCESSING_THREADS, 1) if average else None,
+        # Descargas que corren a la vez (settings.PROCESSING_THREADS en config/settings.py).
+        "en_paralelo": settings.PROCESSING_THREADS,
         # De dónde vienen sus canciones (sin repetir): spotify, youtube, tiktok.
         "origenes": sorted({origen_of(t.url) for t in tracks}),
         # Las primeras 3 canciones que se enviaron a buscar, para reconocer el trabajo de un vistazo.
@@ -1159,7 +1154,7 @@ def retry_track(db: Session, job_id: str, track_id: int) -> Track:
         track = _get_track(db, job_id, track_id)
         if track.status not in ("failed", "skipped", "waiting_auth"):
             raise Conflict("Solo se reintentan canciones que fallaron.")
-        if (track.rondas_usadas or 0) >= MAX_RETRIES_PER_TRACK:
+        if (track.rondas_usadas or 0) >= settings.MAX_RETRIES_PER_TRACK:
             raise Conflict("La canción ya no tiene intentos: cambia la URL.")
         track.status = "pending"
         track.updated_at = _now()

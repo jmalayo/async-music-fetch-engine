@@ -3,11 +3,11 @@ from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from alembic import command
 from alembic.config import Config
 
-from config.settings import ALEMBIC_INI_PATH, ALEMBIC_SCRIPT_LOCATION, DB_PATH
+from config.settings import settings
 
-DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+settings.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
+engine = create_engine(f"sqlite:///{settings.DB_PATH}", connect_args={"check_same_thread": False})
 
 @event.listens_for(engine, "connect")
 def _configure_sqlite(dbapi_conn, _):
@@ -27,6 +27,6 @@ def get_db():
         db.close()
 
 def init_db() -> None:
-    cfg = Config(str(ALEMBIC_INI_PATH))
-    cfg.set_main_option("script_location", str(ALEMBIC_SCRIPT_LOCATION))
+    cfg = Config(str(settings.ALEMBIC_INI_PATH))
+    cfg.set_main_option("script_location", str(settings.ALEMBIC_SCRIPT_LOCATION))
     command.upgrade(cfg, "head")

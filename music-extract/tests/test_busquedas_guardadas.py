@@ -31,7 +31,7 @@ def test_volver_a_buscar_ignora_lo_guardado_y_lo_reemplaza(client, fake_engine):
     assert again["title"] == "Nuevo resultado" and fake_engine.resolves.count(url) == 2
 
 
-def test_lo_vencido_se_vuelve_a_buscar(client, fake_engine):
+def test_lo_guardado_no_vence(client, fake_engine):
     from infrastructure.persistence.database import SessionLocal
     from infrastructure.persistence.models import Busqueda
 
@@ -41,7 +41,7 @@ def test_lo_vencido_se_vuelve_a_buscar(client, fake_engine):
         db.get(Busqueda, url).updated_at = "2020-01-01T00:00:00+00:00"
         db.commit()
     preview(client, url)
-    assert fake_engine.resolves.count(url) == 2
+    assert fake_engine.resolves.count(url) == 1
 
 
 def test_lo_que_no_se_pudo_leer_no_se_guarda(client, fake_engine):

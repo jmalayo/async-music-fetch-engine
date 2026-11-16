@@ -10,11 +10,11 @@ from alembic import context
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from config.settings import DB_PATH
+from config.settings import settings
 from infrastructure.persistence.models import Base
 
 config = context.config
-config.set_main_option("sqlalchemy.url", f"sqlite:///{os.environ.get('ALEMBIC_DB_PATH', DB_PATH)}")
+config.set_main_option("sqlalchemy.url", f"sqlite:///{os.environ.get('ALEMBIC_DB_PATH', settings.DB_PATH)}")
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

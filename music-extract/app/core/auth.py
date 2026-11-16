@@ -2,8 +2,8 @@
 
 - Contraseñas: PBKDF2-SHA256 con sal aleatoria (hashlib), guardadas como «pbkdf2_sha256$iteraciones$sal$hash».
 - Sesión: una cookie HttpOnly con «id_usuario.vencimiento.firma», firmada con HMAC-SHA256 y una clave secreta
-  (OWLO_SECRET_KEY o, si no está, una generada y guardada en data/.secret_key).
-- No hay registro: las cuentas se crean con scripts/create_user.py.
+  (OWLO_SECRET_KEY del .env).
+- No hay registro: las cuentas se crean con scripts/create_user.py (o por SQL), con su cuota de almacenamiento.
 """
 
 import hashlib
@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from fastapi import Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
-from config.settings import SECRET_KEY, SECRET_KEY_FILE, SESSION_COOKIE, SESSION_DAYS, USER_QUOTA_BYTES
+from config.settings import settings
 from infrastructure.persistence.database import get_db
 from infrastructure.persistence.models import User
 
@@ -38,16 +38,11 @@ def verify_password(password: str, stored: str) -> bool:
 
 
 def _secret() -> bytes:
-    if SECRET_KEY:
-        return SECRET_KEY.encode()
-    if not SECRET_KEY_FILE.exists():
-        SECRET_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        SECRET_KEY_FILE.write_text(secrets.token_hex(32))
-    return SECRET_KEY_FILE.read_text().strip().encode()
+    return settings.SECRET_KEY.encode()
 
 
 def make_session(user_id: int) -> str:
-    expires = int(time.time()) + SESSION_DAYS * 86400
+    expires = int(time.time()) + settings.SESSION_MAX_AGE_DAYS * 86400
     payload = f"{user_id}.{expires}"
     signature = hmac.new(_secret(), payload.encode(), hashlib.sha256).hexdigest()
     return f"{payload}.{signature}"
@@ -66,7 +61,7 @@ def read_session(token: str | None) -> int | None:
     return int(user_id)
 
 
-def create_user(db: Session, username: str, password: str, *, is_admin: bool = False, quota_bytes: int | None = None) -> User:
+def create_user(db: Session, username: str, password: str, *, quota_bytes: int, is_admin: bool = False) -> User:
     username = username.strip()
     if not username or not password:
         raise ValueError("El usuario y la contraseña no pueden estar vacíos.")
@@ -75,7 +70,7 @@ def create_user(db: Session, username: str, password: str, *, is_admin: bool = F
     user = User(
         username=username,
         password_hash=hash_password(password),
-        quota_bytes=quota_bytes or USER_QUOTA_BYTES,
+        quota_bytes=quota_bytes,
         is_admin=is_admin,
         created_at=datetime.now(timezone.utc).isoformat(),
     )
@@ -95,7 +90,7 @@ def authenticate(db: Session, username: str, password: str) -> User | None:
 
 def current_user(request: Request, db: Session = Depends(get_db)) -> User | None:
     """El usuario de la cookie de sesión, o None si se usa la web sin cuenta."""
-    user_id = read_session(request.cookies.get(SESSION_COOKIE))
+    user_id = read_session(request.cookies.get(settings.SESSION_COOKIE_NAME))
     return db.get(User, user_id) if user_id else None
 
 

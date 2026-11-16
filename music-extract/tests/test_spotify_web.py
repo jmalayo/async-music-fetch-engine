@@ -10,11 +10,10 @@ import main
 
 @pytest.fixture
 def web_redirect(monkeypatch):
-    from api import auth as auth_api
+    from config.settings import settings
 
     uri = "https://owlo.example.com/api/auth/spotify/callback"
-    monkeypatch.setattr(auth_api, "SPOTIFY_OAUTH_REDIRECT_URI", uri)
-    monkeypatch.setattr(auth_api, "SPOTIFY_OAUTH_LOCAL", False)
+    monkeypatch.setattr(settings, "SPOTIFY_OAUTH_REDIRECT_URI", uri)
     return uri
 
 
@@ -62,7 +61,7 @@ def test_conectar_y_desconectar_spotify_pide_admin(client, anon_client):
 
     # Con cuenta pero sin ser admin: 403.
     with SessionLocal() as db:
-        auth.create_user(db, "comun", "clave-123")
+        auth.create_user(db, "comun", "clave-123", quota_bytes=1024 ** 3)
     with TestClient(main.app) as c:
         assert c.post("/auth/login", json={"username": "comun", "password": "clave-123"}).status_code == 200
         assert c.post("/auth/spotify/authorize").status_code == 403

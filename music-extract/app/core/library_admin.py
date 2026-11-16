@@ -10,7 +10,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from config.settings import MUSIC_DOWNLOADED_ROOT
+from config.settings import settings
 from core import folders, job_service, nube
 from core.job_service import _lock, _now
 from core.web_jobs import Conflict, NotFound, tema_files
@@ -29,7 +29,7 @@ def _folder_tracks(db: Session, user: User, slug: str) -> list[Track]:
 
 def _inside_root(path: Path) -> bool:
     try:
-        path.resolve().relative_to(MUSIC_DOWNLOADED_ROOT.resolve())
+        path.resolve().relative_to(settings.MUSIC_DOWNLOADED_ROOT.resolve())
         return True
     except ValueError:
         return False
@@ -45,7 +45,7 @@ def _remove_files(db: Session, track: Track) -> int:
         shared = db.query(Track).filter(Track.archivo == track.archivo, Track.track_id != track.track_id,
                                         Track.eliminada.is_(False)).first()
         path = Path(track.archivo)
-        path = path if path.is_absolute() else MUSIC_DOWNLOADED_ROOT / path
+        path = path if path.is_absolute() else settings.MUSIC_DOWNLOADED_ROOT / path
         own_temas = tema_files(track)
         if own_temas:
             # Solo los temas de esta descarga: la carpeta del set puede tener temas de otras.
@@ -215,12 +215,12 @@ def move_tracks(db: Session, user: User, track_ids: list[int], nombre: str) -> d
 
             if track.archivo:
                 main = Path(track.archivo)
-                main = main if main.is_absolute() else MUSIC_DOWNLOADED_ROOT / main
-                track.archivo = str(move(main).relative_to(MUSIC_DOWNLOADED_ROOT))
+                main = main if main.is_absolute() else settings.MUSIC_DOWNLOADED_ROOT / main
+                track.archivo = str(move(main).relative_to(settings.MUSIC_DOWNLOADED_ROOT))
             options = _loads(track.tracklist, {}) or {}
             if options.get("archivos"):
                 options["archivos"] = {
-                    k: str(move(MUSIC_DOWNLOADED_ROOT / v).relative_to(MUSIC_DOWNLOADED_ROOT)) for k, v in options["archivos"].items()
+                    k: str(move(settings.MUSIC_DOWNLOADED_ROOT / v).relative_to(settings.MUSIC_DOWNLOADED_ROOT)) for k, v in options["archivos"].items()
                 }
                 track.tracklist = json.dumps(options)
             # Carpetas de temas que quedaron vacías en la carpeta vieja.

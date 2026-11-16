@@ -14,7 +14,6 @@ falla, la canción queda sin `nube` y se reintenta al arrancar el motor (`sync_p
 
 import json
 import logging
-import os
 import secrets
 import string
 import threading
@@ -23,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
-from config import settings
+from config.settings import settings
 from infrastructure.persistence.database import SessionLocal
 from infrastructure.persistence.models import Job, Track
 
@@ -232,11 +231,10 @@ def _upload_track(track_id: int, publish: bool = True) -> None:
             db.commit()
     if stale:
         _delete_prefix(stale)
-    if not keep_local():
-        with SessionLocal() as db:
-            track = db.get(Track, track_id)
-            if track is not None and track.nube == base:
-                free_local(track)
+    with SessionLocal() as db:
+        track = db.get(Track, track_id)
+        if track is not None and track.nube == base:
+            free_local(track)
     if publish:
         _publish_manifest(user_id)
 
@@ -409,7 +407,3 @@ def free_local(track: Track) -> int:
             parent.rmdir()
     return freed
 
-
-def keep_local() -> bool:
-    """Con NUBE_SIN_COPIA_LOCAL=1, la copia en disco se borra en cuanto la canción queda en R2."""
-    return os.getenv("NUBE_SIN_COPIA_LOCAL", "").strip().lower() not in ("1", "true", "si", "sí")

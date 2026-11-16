@@ -168,8 +168,6 @@ def create_job(body: CreateJobRequest, db: Session = Depends(get_db), user: User
     uses_spotify = body.origen == "spotify" or bool(body.playlists) or any("open.spotify.com" in (u or "") for u in body.urls)
     if user is None and uses_spotify:
         raise HTTPException(401, "Inicia sesión para descargar desde Spotify. Sin cuenta puedes usar YouTube y TikTok.")
-    if user is None:
-        downloader_service.purge_anonymous()
     origen = body.origen
     if body.origen == "enlaces":
         urls, playlist_name, playlist_id, meta_by_url, origen = _mixed_input(body, db)

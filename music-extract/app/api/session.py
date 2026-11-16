@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from config.settings import SESSION_COOKIE, SESSION_DAYS
+from config.settings import settings
 from core import auth
 from infrastructure.persistence.database import get_db
 from infrastructure.persistence.models import User
@@ -23,9 +23,9 @@ def login(body: LoginRequest, response: Response, db: Session = Depends(get_db))
     if user is None:
         raise HTTPException(401, "Usuario o contraseña incorrectos.")
     response.set_cookie(
-        SESSION_COOKIE,
+        settings.SESSION_COOKIE_NAME,
         auth.make_session(user.id),
-        max_age=SESSION_DAYS * 86400,
+        max_age=settings.SESSION_MAX_AGE_DAYS * 86400,
         httponly=True,
         samesite="lax",
         path="/",
@@ -35,7 +35,7 @@ def login(body: LoginRequest, response: Response, db: Session = Depends(get_db))
 
 @router.post("/logout", status_code=204)
 def logout(response: Response):
-    response.delete_cookie(SESSION_COOKIE, path="/")
+    response.delete_cookie(settings.SESSION_COOKIE_NAME, path="/")
 
 
 @router.get("/me")

@@ -29,12 +29,8 @@ cookies.txt
 *.sqlite-shm
 
 # ── Runtime data (regenerable, not source code) 
-music-extract/data/music-downloaded/*
-!music-extract/data/music-downloaded/.gitkeep
-music-extract/data/music-normalized/*
-!music-extract/data/music-normalized/.gitkeep
-music-extract/data/cookies/cookies-files/*
-!music-extract/data/cookies/cookies-files/.gitkeep
+music-extract/data/music-downloaded/
+music-extract/data/music-normalized/
 
 spotify-api/definitions
 music-extract/definitions

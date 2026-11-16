@@ -12,7 +12,7 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
 
-from . import progress
+from . import audio, progress, ytdlp_lib
 from .candidate_scoring import rank, score as score_candidate
 from .notube import download_from_notube
 from .spotify_metadata import get_track_metadata
@@ -27,7 +27,25 @@ _PRIVATE = {"premium_only", "needs_auth"}
 MIN_SCORE = 60
 
 # notube espera como máximo 90 s a que el sitio convierta: en audios más largos que esto no se intenta.
-LONG_AUDIO_S = 900
+NOTUBE_MAX_AUDIO_DURATION_S = 900
+# Candidatos de YouTube que se puntúan y prueban por canción.
+TOP_N = 5
+
+
+def configure(*, top_n: int | None = None, youtube_clients: list[str] | None = None, socket_timeout_s: float | None = None,
+              stall_timeout_s: float | None = None, notube_max_audio_duration_s: float | None = None) -> None:
+    """Cambia los valores por defecto de la descarga (la app los toma de su configuración al arrancar)."""
+    global TOP_N, NOTUBE_MAX_AUDIO_DURATION_S
+    if top_n is not None:
+        TOP_N = top_n
+    if notube_max_audio_duration_s is not None:
+        NOTUBE_MAX_AUDIO_DURATION_S = notube_max_audio_duration_s
+    if youtube_clients is not None:
+        ytdlp_lib.CLIENT_CHAIN = list(youtube_clients)
+    if socket_timeout_s is not None:
+        ytdlp_lib.SOCKET_TIMEOUT_S = socket_timeout_s
+    if stall_timeout_s is not None:
+        audio.STALL_TIMEOUT_S = stall_timeout_s
 
 @dataclass
 class SpotifyCredentials:
@@ -189,7 +207,7 @@ def download_youtube_url(
     if avail == "stalled":
         return False, f"[SKIP] stalled — {msg}", intentos, title
 
-    if duration > LONG_AUDIO_S:
+    if duration > NOTUBE_MAX_AUDIO_DURATION_S:
         return False, f"[FATAL] {msg} (audio de {duration / 60:.0f} min: se omite notube)", intentos, title
 
     if avail == "geo_restricted":
@@ -233,7 +251,7 @@ def download_spotify_url(
     proxy: str | None = None,
     candidates_per_source: int = 10,
     candidates_max: int = 15,
-    top_n: int = 5,
+    top_n: int | None = None,
     known_meta: dict | None = None,
     candidates: list[dict] | None = None,
 ):
@@ -261,7 +279,7 @@ def download_spotify_url(
         if not found:
             return "failed", f"[FATAL] Sin candidatos de YouTube para «{query}»", [], title, artist
 
-        top = rank(found, artist, title, meta["duration_s"], top_n=top_n)
+        top = rank(found, artist, title, meta["duration_s"], top_n=top_n or TOP_N)
 
     intentos = []
     last_msg = ""
@@ -295,7 +313,7 @@ def download_spotify_url(
 
             return "incorrect", f"[{c.get('source', '?')}] {c['title']} (score {score:.1f} < {MIN_SCORE})", intentos, title, artist
 
-        if avail == "geo_restricted" and (c.get("duration") or 0) <= LONG_AUDIO_S:
+        if avail == "geo_restricted" and (c.get("duration") or 0) <= NOTUBE_MAX_AUDIO_DURATION_S:
             t0 = time.monotonic()
             ok2, msg2 = download_from_notube(c["url"], out_dir)
             progress.check_cancelled()
@@ -331,7 +349,7 @@ def download(
     proxy: str | None = None,
     candidates_per_source: int = 10,
     candidates_max: int = 15,
-    top_n: int = 5,
+    top_n: int | None = None,
     known_meta: dict | None = None,
     candidates: list[dict] | None = None,
 ) -> dict:
@@ -485,7 +503,7 @@ def resolve(
     proxy: str | None = None,
     candidates_per_source: int = 10,
     candidates_max: int = 15,
-    top_n: int = 5,
+    top_n: int | None = None,
     known_meta: dict | None = None,
 ) -> dict:
     """Vista previa de una canción: qué es y qué se bajaría, sin descargar audio.
@@ -513,7 +531,7 @@ def resolve(
                 candidates_per_source=candidates_per_source,
                 candidates_max=candidates_max,
             )
-            top = [_public_candidate(c) for c in rank(found, artist, title, meta["duration_s"], top_n=top_n)] if found else []
+            top = [_public_candidate(c) for c in rank(found, artist, title, meta["duration_s"], top_n=top_n or TOP_N)] if found else []
 
             return {
                 "origen": "spotify",
@@ -607,7 +625,7 @@ def search_song(
     cookies_file: Path,
     js_runtime: str | None = None,
     proxy: str | None = None,
-    top_n: int = 5,
+    top_n: int | None = None,
     query: str | None = None,
     tema: bool = False,
 ) -> list[dict]:
@@ -617,7 +635,7 @@ def search_song(
     js_runtime = js_runtime or default_js_runtime()
     with _private_cookies_copy(cookies_file) as private_cookies:
         found = gather_candidates(query or f"{artist} {title}".strip(), cookies_file=private_cookies, js_runtime=js_runtime, proxy=proxy)
-    return [_public_candidate(c) for c in rank(found, artist, title, duration_s or 0, top_n=top_n, tema=tema)] if found else []
+    return [_public_candidate(c) for c in rank(found, artist, title, duration_s or 0, top_n=top_n or TOP_N, tema=tema)] if found else []
 
 
 def download_song(

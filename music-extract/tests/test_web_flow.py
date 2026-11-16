@@ -338,11 +338,11 @@ def test_video_que_no_se_pudo_leer_se_marca_no_disponible(client, fake_engine):
 
 
 def test_resumen_informa_las_descargas_en_paralelo(client, fake_engine):
-    from config.settings import THREADS
+    from config.settings import settings
 
     job_id = create_youtube(client, [yt("para")])
     preview_ready(client, job_id)
-    assert client.get(f"/jobs/{job_id}").json()["en_paralelo"] == THREADS
+    assert client.get(f"/jobs/{job_id}").json()["en_paralelo"] == settings.PROCESSING_THREADS
 
 
 def test_volver_a_buscar_una_sola_cancion(client, fake_engine):

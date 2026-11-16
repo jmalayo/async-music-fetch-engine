@@ -35,7 +35,7 @@ Para obtenerla:
 3. Pegar y ejecutar ahí el contenido de `music-extract/data/cookies/extract.js` (ya incluido en
   el repositorio), usa la CookieStore API del navegador (disponible en Chrome/Edge, no en  todos) para leer las cookies visibles y armar un archivo en formato Netscape.
 4. El navegador descarga automáticamente un archivo `cookies.txt`.
-5. Mover ese archivo a `music-extract/data/cookies/cookies-files/cookies.txt`.
+5. Mover ese archivo a `music-extract/data/cookies/cookies.txt`.
 
 El archivo `cookies.txt`, al ser un recurso compartido entre workers de descarga en paralelo, utiliza una copia privada temporal para cada descarga en lugar del archivo original. Esto se debe a que `yt-dlp` reescribe el archivo de cookies al cerrar cada sesión, y compartir el mismo archivo entre threads producía corrupción intermitente antes de aislarlo por descarga.
 
@@ -134,7 +134,7 @@ La metadata se obtiene directamente desde la Spotify Web API y, al procesar play
 
 ### Carpeta de descargas
 
-Los archivos se almacenan en `data/music-downloaded/{carpeta}/`, donde cada carpeta corresponde a un `group_name` (descargas manuales) o al nombre de la playlist. Ambos valores se normalizan (minúsculas, sin tildes, espacios reemplazados por `_` y eliminación de caracteres inválidos). Si una descarga manual no tiene `group_name`, se almacena en la carpeta compartida `any-musics/`.  
+Los archivos se bajan a una carpeta temporal del sistema (`/tmp/owlo/{carpeta}/`, o `MUSIC_DOWNLOADED_ROOT`) y, con la nube configurada, quedan solo en R2, donde cada carpeta corresponde a un `group_name` (descargas manuales) o al nombre de la playlist. Ambos valores se normalizan (minúsculas, sin tildes, espacios reemplazados por `_` y eliminación de caracteres inválidos). Si una descarga manual no tiene `group_name`, se almacena en la carpeta compartida `any-musics/`.  
 
 El nombre final del archivo proviene del video descargado del mejor candidato y no del título oficial de Spotify, por lo que puede no coincidir exactamente con el formato "Artista - Canción".
 

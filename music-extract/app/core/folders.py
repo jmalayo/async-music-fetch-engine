@@ -1,4 +1,4 @@
-"""Carpetas de descarga de cada usuario: las subcarpetas de MUSIC_DOWNLOADED_ROOT/<usuario>/.
+"""Carpetas de descarga de cada usuario: las subcarpetas de settings.MUSIC_DOWNLOADED_ROOT/<usuario>/.
 
 En disco el nombre va normalizado (`slugify`: «Rock de los 80» → `rock_de_los_80`). El nombre que escribió el
 usuario se guarda en un archivo `.owlo-carpeta.json` dentro de la carpeta, para mostrarlo tal cual. Una
@@ -8,11 +8,13 @@ carpeta sin ese archivo (creada antes, o por los endpoints anteriores) se muestr
 import json
 from pathlib import Path
 
-from config.settings import ANON_DIR_NAME, MUSIC_DOWNLOADED_ROOT
+from config.settings import settings
 from core import job_service
 
 META_FILE = ".owlo-carpeta.json"
 DEFAULT_FOLDER = "Canciones sueltas"
+# Descargas sin cuenta: se borran apenas se entregan (y lo que quede, al arrancar el motor).
+ANON_DIR = "_sin-cuenta"
 MAX_NAME = 80
 
 
@@ -63,12 +65,12 @@ def remember_name(path: Path, nombre: str) -> None:
 
 
 def user_root(username: str) -> Path:
-    """Carpeta raíz de un usuario. Las descargas sin cuenta van aparte, en ANON_DIR_NAME."""
-    return MUSIC_DOWNLOADED_ROOT / job_service.slugify(username)
+    """Carpeta raíz de un usuario. Las descargas sin cuenta van aparte, en ANON_DIR."""
+    return settings.MUSIC_DOWNLOADED_ROOT / job_service.slugify(username)
 
 
 def anon_root() -> Path:
-    return MUSIC_DOWNLOADED_ROOT / ANON_DIR_NAME
+    return settings.MUSIC_DOWNLOADED_ROOT / ANON_DIR
 
 
 def folder_payload(path: Path) -> dict:

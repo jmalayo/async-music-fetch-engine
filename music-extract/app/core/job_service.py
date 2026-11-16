@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from config.settings import TOP_N, CLIENT_CHAIN_LEN, MAX_RETRIES_PER_TRACK, ETA_WINDOW
+from config.settings import settings
 from infrastructure.persistence.models import Job, Track, Attempt, Retry
 from core.schemas import DownloadStatusResponse, AttemptDetail, JobSummary, TrackDetailResponse, LastRetry, FailedUrl
 from threading import Lock
@@ -40,10 +40,10 @@ def _is_youtube(url: str) -> bool:
 
 def calculate_max_attempts(url: str) -> int:
     if _is_spotify(url):
-        return TOP_N * CLIENT_CHAIN_LEN
+        return settings.SPOTIFY_YOUTUBE_MATCH_LIMIT * len(settings.YOUTUBE_CLIENTS)
     if _is_youtube(url):
-        return CLIENT_CHAIN_LEN + 1
-    return CLIENT_CHAIN_LEN
+        return len(settings.YOUTUBE_CLIENTS) + 1
+    return len(settings.YOUTUBE_CLIENTS)
 
 def _find_previously_successful(db: Session, urls: list[str]) -> dict[str, Track]:
     if not urls:
@@ -380,8 +380,6 @@ def _calculate_eta(db: Session, job_id: str, pending_count: int) -> float | None
     rows = (
         db.query(Track.elapsed_s)
         .filter(Track.job_id == job_id, Track.status.in_(["successful", "incorrect", "failed"]))
-        .order_by(Track.updated_at.desc())
-        .limit(ETA_WINDOW)
         .all()
     )
 
@@ -414,8 +412,6 @@ def get_status(db: Session, job_id: str) -> DownloadStatusResponse | None:
     duration_rows = (
         db.query(Track.elapsed_s)
         .filter(Track.job_id == job_id, Track.status.in_(["successful", "incorrect", "failed"]))
-        .order_by(Track.updated_at.desc())
-        .limit(ETA_WINDOW)
         .all()
     )
 
@@ -533,7 +529,7 @@ def retry(db: Session, job_id: str) -> tuple[int | None, list[tuple[int, str, di
         failed_tracks = db.query(Track).filter(Track.job_id == job_id, Track.status.in_(["failed", "skipped"])).all()
 
         # Solo cuentan los intentos de una canción que nunca bajó: `rondas_usadas` vuelve a 0 al bajar bien.
-        candidates = [t for t in failed_tracks if (t.rondas_usadas or 0) < MAX_RETRIES_PER_TRACK]
+        candidates = [t for t in failed_tracks if (t.rondas_usadas or 0) < settings.MAX_RETRIES_PER_TRACK]
 
         if not candidates:
             return None, []

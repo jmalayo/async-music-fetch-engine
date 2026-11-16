@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from config.settings import WEB_ORIGINS
+from config.settings import settings
 from infrastructure.persistence.database import init_db
 from infrastructure.external import downloader_service
 from core import nube
@@ -28,7 +28,7 @@ app = FastAPI(title="music-extract API", lifespan=lifespan)
 # contra la API, CORS tiene que permitir su origen.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=WEB_ORIGINS,
+    allow_origins=settings.WEB_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

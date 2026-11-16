@@ -215,8 +215,7 @@ def test_llaves_desde_el_token_de_r2(monkeypatch):
 # --- Solo en la nube: R2 como fuente y sin copia local ---------------------------------------------------------
 
 @pytest.fixture
-def solo_nube(r2, monkeypatch):
-    monkeypatch.setenv("NUBE_SIN_COPIA_LOCAL", "1")
+def solo_nube(r2):
     return r2
 
 
@@ -290,14 +289,17 @@ def test_solo_nube_mover_y_borrar(client, fake_engine, solo_nube, downloads_root
     assert client.get(f"/tracks/{track['track_id']}/file", follow_redirects=False).status_code == 404
 
 
-def test_no_borra_la_copia_local_si_r2_no_la_tiene_completa(client, fake_engine, r2, downloads_root):
+def test_no_borra_la_copia_local_si_r2_no_la_tiene_completa(client, fake_engine, r2, downloads_root, monkeypatch):
     from core import nube
     from infrastructure.persistence.database import SessionLocal
     from infrastructure.persistence.models import Track
 
+    def upload_recortado(filename, bucket, key, ExtraArgs=None):
+        r2.objects[key] = {"body": b"recortado", **(ExtraArgs or {})}  # en R2 quedó distinto
+
+    monkeypatch.setattr(r2, "upload_file", upload_recortado)
     track = downloaded(client, "Nube Incompleta", tag="sninc")
-    key = next(k for k in synced(r2).mp3s() if f"/t/{track['track_id']}-" in k)
-    r2.objects[key]["body"] = b"recortado"  # en R2 quedó distinto
+    synced(r2)
     with SessionLocal() as db:
         assert nube.free_local(db.get(Track, track["track_id"])) == 0
     assert local_mp3s(downloads_root, "nube_incompleta") == ["Canal - Video.mp3"]

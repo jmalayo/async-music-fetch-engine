@@ -5,14 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
-from config.settings import (
-    SPOTIFY_CLIENT_ID,
-    SPOTIFY_CLIENT_SECRET,
-    SPOTIFY_OAUTH_CALLBACK_PORT,
-    SPOTIFY_OAUTH_LOCAL,
-    SPOTIFY_OAUTH_REDIRECT_URI,
-    SPOTIFY_OAUTH_SCOPES,
-)
+from config.settings import settings
 from api.schemas import SpotifyLoginRequest
 from core import auth as accounts
 from infrastructure.external import spotify_client, spotify_oauth
@@ -31,8 +24,8 @@ def require_admin(user: User = Depends(accounts.require_user)) -> User:
 @router.post("/spotify/login")
 def start_spotify_auth(body: SpotifyLoginRequest | None = None, db: Session = Depends(get_db), _: User = Depends(require_admin)):
     body = body or SpotifyLoginRequest()
-    client_id = body.client_id or SPOTIFY_CLIENT_ID
-    client_secret = body.client_secret or SPOTIFY_CLIENT_SECRET
+    client_id = body.client_id or settings.SPOTIFY_CLIENT_ID
+    client_secret = body.client_secret or settings.SPOTIFY_CLIENT_SECRET
 
     if not client_id or not client_secret:
         raise HTTPException(422, "Falta client_id/client_secret (ni se paso en el body ni esta configurado en el .env)")
@@ -41,9 +34,9 @@ def start_spotify_auth(body: SpotifyLoginRequest | None = None, db: Session = De
         token_data = spotify_oauth.run_authorization_flow(
             client_id=client_id,
             client_secret=client_secret,
-            redirect_uri=SPOTIFY_OAUTH_REDIRECT_URI,
-            port=SPOTIFY_OAUTH_CALLBACK_PORT,
-            scopes=SPOTIFY_OAUTH_SCOPES,
+            redirect_uri=settings.SPOTIFY_OAUTH_REDIRECT_URI,
+            port=settings.SPOTIFY_OAUTH_CALLBACK_PORT,
+            scopes=settings.SPOTIFY_OAUTH_SCOPES,
         )
     except spotify_oauth.AuthorizationDenied as e:
         raise HTTPException(400, str(e))
@@ -59,8 +52,8 @@ def spotify_authorize(body: SpotifyLoginRequest | None = None, _: User = Depends
     La web abre la URL en otra pestaña y consulta `/spotify/account-status` hasta que quede conectada.
     """
     body = body or SpotifyLoginRequest()
-    client_id = body.client_id or SPOTIFY_CLIENT_ID
-    client_secret = body.client_secret or SPOTIFY_CLIENT_SECRET
+    client_id = body.client_id or settings.SPOTIFY_CLIENT_ID
+    client_secret = body.client_secret or settings.SPOTIFY_CLIENT_SECRET
     if not client_id or not client_secret:
         raise HTTPException(422, "Falta client_id/client_secret (ni se paso en el body ni esta configurado en el .env)")
 
@@ -68,17 +61,17 @@ def spotify_authorize(body: SpotifyLoginRequest | None = None, _: User = Depends
         with SessionLocal() as db:
             spotify_client.save_user_token(db, token_data, client_id=client_id, client_secret=client_secret)
 
-    if not SPOTIFY_OAUTH_LOCAL:
-        url = spotify_oauth.start_web_flow(client_id=client_id, client_secret=client_secret, redirect_uri=SPOTIFY_OAUTH_REDIRECT_URI,
-                                           scopes=SPOTIFY_OAUTH_SCOPES, on_token=save)
+    if not settings.SPOTIFY_OAUTH_REDIRECT_URI.startswith(("http://127.0.0.1", "http://localhost")):
+        url = spotify_oauth.start_web_flow(client_id=client_id, client_secret=client_secret, redirect_uri=settings.SPOTIFY_OAUTH_REDIRECT_URI,
+                                           scopes=settings.SPOTIFY_OAUTH_SCOPES, on_token=save)
         return {"url": url}
 
     url = spotify_oauth.start_authorization_flow(
         client_id=client_id,
         client_secret=client_secret,
-        redirect_uri=SPOTIFY_OAUTH_REDIRECT_URI,
-        port=SPOTIFY_OAUTH_CALLBACK_PORT,
-        scopes=SPOTIFY_OAUTH_SCOPES,
+        redirect_uri=settings.SPOTIFY_OAUTH_REDIRECT_URI,
+        port=settings.SPOTIFY_OAUTH_CALLBACK_PORT,
+        scopes=settings.SPOTIFY_OAUTH_SCOPES,
         on_token=save,
     )
     return {"url": url}
@@ -87,7 +80,7 @@ def spotify_authorize(body: SpotifyLoginRequest | None = None, _: User = Depends
 @router.get("/spotify/callback", include_in_schema=False)
 def spotify_callback(code: str | None = None, state: str | None = None, error: str | None = None):
     """Spotify vuelve aquí (vía la web). Guarda el token y regresa a la web, que ya muestra «Conectado»."""
-    parsed = urlparse(SPOTIFY_OAUTH_REDIRECT_URI)
+    parsed = urlparse(settings.SPOTIFY_OAUTH_REDIRECT_URI)
     home = f"{parsed.scheme}://{parsed.netloc}/"
     try:
         spotify_oauth.finish_web_flow(state=state, code=code, error=error)

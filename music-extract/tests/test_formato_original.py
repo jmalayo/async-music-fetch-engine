@@ -80,7 +80,6 @@ def test_original_en_la_nube_usa_su_extension(client, fake_engine, monkeypatch):
 
     fake = FakeR2()
     nube.use_client(fake)
-    monkeypatch.setenv("NUBE_SIN_COPIA_LOCAL", "1")
     try:
         def download(url, *, out_dir, **kwargs):
             from musictools.download import audio

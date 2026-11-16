@@ -1,5 +1,4 @@
 import base64
-import csv
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -7,7 +6,7 @@ from pathlib import Path
 import requests
 from sqlalchemy.orm import Session
 
-from config.settings import CSV_COLUMNS, PLAYLISTS_FETCHED_DIR, SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
+from config.settings import settings
 from core import job_service
 from infrastructure.external import spotify_oauth
 from infrastructure.persistence.models import SpotifyToken
@@ -24,7 +23,7 @@ def _format_duration(ms: int) -> str:
     return f"{total_s // 60:02d}:{total_s % 60:02d}"
 
 def get_app_token() -> str:
-    auth = base64.b64encode(f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode()).decode()
+    auth = base64.b64encode(f"{settings.SPOTIFY_CLIENT_ID}:{settings.SPOTIFY_CLIENT_SECRET}".encode()).decode()
 
     r = requests.post(
         "https://accounts.spotify.com/api/token",
@@ -71,8 +70,8 @@ def get_user_token(db: Session) -> str | None:
     if expires_at > datetime.now(timezone.utc) + timedelta(seconds=30):
         return row.access_token
 
-    client_id = row.client_id or SPOTIFY_CLIENT_ID
-    client_secret = row.client_secret or SPOTIFY_CLIENT_SECRET
+    client_id = row.client_id or settings.SPOTIFY_CLIENT_ID
+    client_secret = row.client_secret or settings.SPOTIFY_CLIENT_SECRET
 
     data = spotify_oauth.refresh_access_token(
         row.refresh_token, client_id=client_id, client_secret=client_secret,
@@ -218,17 +217,6 @@ def get_playlist_tracks(playlist_id: str, token: str) -> list[dict]:
         params = None
 
     return tracks
-
-def write_csv(playlist_name: str, tracks: list[dict]) -> Path:
-    PLAYLISTS_FETCHED_DIR.mkdir(parents=True, exist_ok=True)
-    destination = PLAYLISTS_FETCHED_DIR / f"{job_service.slugify(playlist_name)}.csv"
-
-    with destination.open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS, delimiter=";")
-        writer.writeheader()
-        writer.writerows(tracks)
-
-    return destination
 
 def search_and_get_tracks(playlist_name_or_url: str, db: Session) -> tuple[dict | None, list[dict]]:
     user_token = get_user_token(db)

@@ -12,7 +12,7 @@ venv
 # Runtime data — mounted as volumes at runtime, not needed in the image.
 music-extract/data/music-downloaded
 music-extract/data/music-normalized
-music-extract/data/cookies/cookies-files
+music-extract/data/cookies/cookies.txt
 music-extract/app/db/*.sqlite*
 
 # Secrets — never baked into the image, injected via env_file at runtime.

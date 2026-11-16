@@ -1,5 +1,4 @@
 import contextvars
-import os
 import re
 import time
 import yt_dlp
@@ -25,7 +24,9 @@ _CLIENT_BLOCK_KEYWORDS = (
     "watch on youtube",
 )
 
-_CLIENT_CHAIN = ["web", "web_safari", "mweb", "web_music", "tv"]
+# Clientes de YouTube que se prueban en cadena y segundos sin datos antes de cortar la conexión (configure()).
+CLIENT_CHAIN = ["web", "web_safari", "mweb", "web_music", "tv"]
+SOCKET_TIMEOUT_S = 15
 
 _VIDEO_ID_RE = re.compile(r"(?:v=|youtu\.be/)([\w-]{11})")
 
@@ -74,8 +75,8 @@ def _parse_js_runtime(js_runtime: str) -> dict:
     return {runtime.lower(): {"path": path or None}}
 
 # Cookies de un navegador para los videos que piden iniciar sesión (edad, privados): «firefox» o
-# «firefox:/ruta/al/perfil». Solo se usan al reintentar una descarga que falló por needs_auth.
-BROWSER_COOKIES = os.getenv("YTDLP_COOKIES_FROM_BROWSER") or None
+# «firefox:/ruta/al/perfil». Solo se usan al reintentar una descarga que falló por needs_auth. Lo fija la app.
+BROWSER_COOKIES: str | None = None
 
 
 # Las cookies del navegador son de la cuenta de Google del dueño: solo se prestan a descargas de usuarios con
@@ -130,7 +131,7 @@ def _common_opts(cookies_file: Path, js_runtime: str, proxy: str | None = None, 
         # El progreso va al reporter (progress_hooks), no a la consola.
         "noprogress": True,
         "noplaylist": True,
-        "socket_timeout": 15,
+        "socket_timeout": SOCKET_TIMEOUT_S,
         "cookiefile": str(cookies_file),
         "js_runtimes": _parse_js_runtime(js_runtime),
     }
@@ -266,7 +267,7 @@ def download_with_rotation(
         return ok, avail, msg, intentos
 
     chain = [
-        c for c in _CLIENT_CHAIN 
+        c for c in CLIENT_CHAIN 
             if c != "web_music" or "music.youtube.com" in url
     ]
 

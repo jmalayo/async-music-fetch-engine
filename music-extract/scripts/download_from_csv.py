@@ -12,7 +12,7 @@ from musictools.download.core import SpotifyCredentials, default_js_runtime, dow
 MUSIC_EXTRACT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = MUSIC_EXTRACT_DIR / "data"
 ENV_PATH = MUSIC_EXTRACT_DIR / ".env"
-COOKIES_FILE = DATA_DIR / "cookies" / "cookies-files" / "cookies.txt"
+COOKIES_FILE = DATA_DIR / "cookies" / "cookies.txt"
 CACHE_PATH = DATA_DIR / "blocked_cache.json"
 PLAYLISTS_FETCHED_DIR = MUSIC_EXTRACT_DIR.parent / "spotify-api" / "playlists-fetched"
 

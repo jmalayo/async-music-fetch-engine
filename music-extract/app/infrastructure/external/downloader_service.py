@@ -8,33 +8,30 @@ from sqlalchemy.orm import Session
 
 from musictools.download import audio, progress, ytdlp_lib
 from musictools.download.core import (
-    SpotifyCredentials, default_js_runtime, download, download_song, query_variants, resolve, score_url_for, search_song,
+    SpotifyCredentials, configure, default_js_runtime, download, download_song, query_variants, resolve, score_url_for, search_song,
     split_tema_title,
 )
 from musictools.download.progress import Reporter, TrackCancelled
 
-from config.settings import (
-    BLOCKED_CACHE_PATH,
-    BITRATE,
-    COOKIES_FILE,
-    FORMAT,
-    MUSIC_DOWNLOADED_ROOT,
-    PROXY,
-    SPOTIFY_CLIENT_ID,
-    SPOTIFY_CLIENT_SECRET,
-    THREADS,
-    ANON_RETENTION_HOURS,
-)
+from config.settings import settings
 from infrastructure.persistence.database import SessionLocal
 from infrastructure.persistence.models import Track, User
 from core import folders, job_service, web_jobs
 
-# Dos pools: uno para descargar (THREADS en paralelo) y otro para la vista previa, así buscar canciones
+# Dos pools: uno para descargar (settings.PROCESSING_THREADS en paralelo) y otro para la vista previa, así buscar canciones
 # nuevas no espera a que terminen las descargas en curso.
-_executor = ThreadPoolExecutor(max_workers=THREADS, thread_name_prefix="download")
-_resolver = ThreadPoolExecutor(max_workers=THREADS, thread_name_prefix="resolve")
+_executor = ThreadPoolExecutor(max_workers=settings.PROCESSING_THREADS, thread_name_prefix="download")
+_resolver = ThreadPoolExecutor(max_workers=settings.PROCESSING_THREADS, thread_name_prefix="resolve")
 _js_runtime = default_js_runtime()
-_spotify_creds = SpotifyCredentials(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET)
+configure(
+    top_n=settings.SPOTIFY_YOUTUBE_MATCH_LIMIT,
+    youtube_clients=settings.YOUTUBE_CLIENTS,
+    socket_timeout_s=settings.SOCKET_TIMEOUT_S,
+    stall_timeout_s=settings.FFMPEG_STALL_TIMEOUT_S,
+    notube_max_audio_duration_s=settings.NOTUBE_MAX_AUDIO_DURATION_S,
+)
+ytdlp_lib.BROWSER_COOKIES = settings.YTDLP_COOKIES_FROM_BROWSER or None
+_spotify_creds = SpotifyCredentials(client_id=settings.SPOTIFY_CLIENT_ID, client_secret=settings.SPOTIFY_CLIENT_SECRET)
 
 # Progreso en memoria de cada canción en curso: track_id → Reporter. No se escribe en la base.
 _reporters: dict[int, Reporter] = {}
@@ -58,10 +55,10 @@ def resolve_output_dir(db: Session, job_id: str) -> Path:
 
     # Endpoints anteriores (/downloads): como siempre.
     elif job.type == "manual-urls":
-        out_dir = MUSIC_DOWNLOADED_ROOT / (job_service.slugify(job.playlist_name) if job.playlist_name else "any-musics")
+        out_dir = settings.MUSIC_DOWNLOADED_ROOT / (job_service.slugify(job.playlist_name) if job.playlist_name else "any-musics")
 
     elif job.type == "playlist-urls":
-        out_dir = MUSIC_DOWNLOADED_ROOT / job_service.slugify(job.playlist_name)
+        out_dir = settings.MUSIC_DOWNLOADED_ROOT / job_service.slugify(job.playlist_name)
 
     else:
         raise ValueError(f"Tipo de job no soportado: {job.type}")
@@ -72,14 +69,8 @@ def resolve_output_dir(db: Session, job_id: str) -> Path:
 
 
 def purge_anonymous() -> None:
-    """Borra las descargas sin cuenta de más de ANON_RETENTION_HOURS: no ocupan almacenamiento de nadie."""
-    root = folders.anon_root()
-    if not root.exists():
-        return
-    limit = time.time() - ANON_RETENTION_HOURS * 3600
-    for path in root.iterdir():
-        if path.is_dir() and path.stat().st_mtime < limit:
-            shutil.rmtree(path, ignore_errors=True)
+    """Borra las descargas sin cuenta que quedaron sin entregar (se llama al arrancar, sin descargas en curso)."""
+    shutil.rmtree(folders.anon_root(), ignore_errors=True)
 
 
 # --- Progreso y cancelación -----------------------------------------------------------------------
@@ -113,10 +104,10 @@ def _resolve_track(track_id: int, url: str, known_meta: dict | None, force: bool
             with ytdlp_lib.browser_cookies_allowed(with_account):
                 data = resolve(
                     url,
-                    cookies_file=COOKIES_FILE,
+                    cookies_file=settings.COOKIES_FILE,
                     js_runtime=_js_runtime,
                     spotify_creds=_spotify_creds,
-                    proxy=PROXY,
+                    proxy=settings.PROXY,
                     known_meta=known_meta,
                 )
         except Exception as e:  # noqa: BLE001 — cualquier error de una canción no debe frenar la vista previa
@@ -149,8 +140,8 @@ def _wider_candidates(meta: dict, found: list[dict], top_n: int = 8) -> list[dic
     by_url = {c.get("url"): c for c in found if c.get("url")}
     for query in query_variants(artist, title):
         try:
-            more = search_song(artist, title, meta.get("duration_s"), cookies_file=COOKIES_FILE, js_runtime=_js_runtime,
-                               proxy=PROXY, top_n=top_n, query=query)
+            more = search_song(artist, title, meta.get("duration_s"), cookies_file=settings.COOKIES_FILE, js_runtime=_js_runtime,
+                               proxy=settings.PROXY, top_n=top_n, query=query)
         except Exception:  # noqa: BLE001 — una frase que falla no frena las demás
             more = []
         for c in more:
@@ -172,7 +163,7 @@ def _search_temas(chapters: list[dict], total_s: float | None) -> list[dict]:
             fin = chapters[i + 1].get("inicio_s") if i + 1 < len(chapters) else total_s
         duracion = (fin - (chapter.get("inicio_s") or 0)) if fin else None
         try:
-            candidatos = search_song(artista, cancion, duracion, cookies_file=COOKIES_FILE, js_runtime=_js_runtime, proxy=PROXY, tema=True)
+            candidatos = search_song(artista, cancion, duracion, cookies_file=settings.COOKIES_FILE, js_runtime=_js_runtime, proxy=settings.PROXY, tema=True)
         except Exception:  # noqa: BLE001 — sin búsqueda, el tema se corta del set
             candidatos = []
         found = {**chapter, "artista": artista, "cancion": cancion, "candidatos": candidatos, "busqueda": TEMA_SEARCH_VERSION}
@@ -195,8 +186,8 @@ def _research_tema(track_id: int, index: int, meta: dict) -> None:
             with_account = bool(track and track.job and track.job.user_id is not None)
         with ytdlp_lib.browser_cookies_allowed(with_account):
             for query in query_variants(meta["artista"], meta["cancion"])[:4]:
-                for c in search_song(meta["artista"], meta["cancion"], meta["duracion"], cookies_file=COOKIES_FILE,
-                                     js_runtime=_js_runtime, proxy=PROXY, top_n=8, query=query, tema=True):
+                for c in search_song(meta["artista"], meta["cancion"], meta["duracion"], cookies_file=settings.COOKIES_FILE,
+                                     js_runtime=_js_runtime, proxy=settings.PROXY, top_n=8, query=query, tema=True):
                     if c["url"] not in found or (c.get("score") or 0) > (found[c["url"]].get("score") or 0):
                         found[c["url"]] = c
     except Exception:  # noqa: BLE001 — sin resultados, el tema queda como estaba
@@ -220,11 +211,11 @@ def resolve_new_url(url: str, track: dict) -> dict:
     if track["origen"] == "spotify":
         candidate = score_url_for(
             url, artist=track.get("artist") or "", title=track.get("title") or "", duration_s=track.get("duration_s"),
-            cookies_file=COOKIES_FILE, js_runtime=_js_runtime, proxy=PROXY,
+            cookies_file=settings.COOKIES_FILE, js_runtime=_js_runtime, proxy=settings.PROXY,
         )
         return {"candidatos": [candidate] if candidate else [], "disponible": candidate is not None}
 
-    return resolve(url, cookies_file=COOKIES_FILE, js_runtime=_js_runtime, proxy=PROXY)
+    return resolve(url, cookies_file=settings.COOKIES_FILE, js_runtime=_js_runtime, proxy=settings.PROXY)
 
 
 # --- Descarga -------------------------------------------------------------------------------------
@@ -233,7 +224,7 @@ def _move_results(work_dir: Path, out_dir: Path) -> dict:
     """Mueve lo terminado (MP3 y carpeta de temas) a la carpeta definitiva.
 
     Devuelve lo que se registra en la biblioteca: el archivo principal (el MP3 completo o, si solo quedaron los
-    temas del tracklist, su carpeta), con ruta relativa a MUSIC_DOWNLOADED_ROOT, y el tamaño total.
+    temas del tracklist, su carpeta), con ruta relativa a settings.MUSIC_DOWNLOADED_ROOT, y el tamaño total.
     """
     moved: list[Path] = []
     for item in work_dir.iterdir():
@@ -261,7 +252,7 @@ def _move_results(work_dir: Path, out_dir: Path) -> dict:
     size = lambda p: sum(f.stat().st_size for f in p.rglob("*") if f.is_file()) if p.is_dir() else p.stat().st_size  # noqa: E731
     main = next((p for p in moved if p.is_file()), moved[0])
     try:
-        relative = str(main.relative_to(MUSIC_DOWNLOADED_ROOT))
+        relative = str(main.relative_to(settings.MUSIC_DOWNLOADED_ROOT))
     except ValueError:
         relative = str(main)
     return {"archivo": relative, "bytes": sum(size(p) for p in moved)}
@@ -298,7 +289,7 @@ def _download_temas(work_dir: Path, plan: dict, reporter: Reporter) -> dict | No
             tmp.mkdir(exist_ok=True)
             result = download_song(
                 artist=tema["artista"], title=tema["cancion"], duration_s=duracion, candidates=tema["candidatos"], out_dir=tmp,
-                cookies_file=COOKIES_FILE, cache_path=BLOCKED_CACHE_PATH, js_runtime=_js_runtime, fmt=plan.get("formato") or FORMAT, bitrate=BITRATE, proxy=PROXY,
+                cookies_file=settings.COOKIES_FILE, cache_path=settings.YOUTUBE_BLOCKED_VIDEOS_PATH, js_runtime=_js_runtime, fmt=plan.get("formato") or "mp3", bitrate=settings.MP3_ENCODING_BITRATE, proxy=settings.PROXY,
             )
             got = sorted(p for p in tmp.iterdir() if p.is_file() and p.suffix.lower() in audio.AUDIO_EXTS)
             if result["estado"] == "successful" and got:
@@ -356,13 +347,13 @@ def _process_track(job_id: str, track_id: int, url: str, iteration_count: int, k
             result = download(
                 url,
                 out_dir=work_dir,
-                cookies_file=COOKIES_FILE,
-                cache_path=BLOCKED_CACHE_PATH,
+                cookies_file=settings.COOKIES_FILE,
+                cache_path=settings.YOUTUBE_BLOCKED_VIDEOS_PATH,
                 js_runtime=_js_runtime,
-                fmt=plan.get("formato") or FORMAT,
-                bitrate=BITRATE,
+                fmt=plan.get("formato") or "mp3",
+                bitrate=settings.MP3_ENCODING_BITRATE,
                 spotify_creds=_spotify_creds,
-                proxy=PROXY,
+                proxy=settings.PROXY,
                 known_meta=known_meta or plan["known_meta"],
                 candidates=plan["candidates"],
             )
@@ -375,11 +366,11 @@ def _process_track(job_id: str, track_id: int, url: str, iteration_count: int, k
         files = _move_results(work_dir, out_dir) if result["estado"] in ("successful", "incorrect") else None
         if files is not None and temas is not None:
             paths = {i: out_dir / temas["carpeta"] / name for i, name in temas["nombres"].items()}
-            files["temas"] = {i: str(p.relative_to(MUSIC_DOWNLOADED_ROOT)) for i, p in paths.items()}
+            files["temas"] = {i: str(p.relative_to(settings.MUSIC_DOWNLOADED_ROOT)) for i, p in paths.items()}
             files["fuentes"] = temas["fuentes"]
             files["urls"] = temas["urls"]
             # Peso: el set completo más los temas de esta descarga (la carpeta puede tener temas de otras).
-            full = MUSIC_DOWNLOADED_ROOT / files["archivo"] if files.get("archivo") else None
+            full = settings.MUSIC_DOWNLOADED_ROOT / files["archivo"] if files.get("archivo") else None
             files["bytes"] = (full.stat().st_size if full and full.is_file() else 0) + sum(p.stat().st_size for p in paths.values())
 
         with SessionLocal() as db:
@@ -414,7 +405,7 @@ def enqueue_job(job_id: str, tracks: list[tuple[int, str, dict | None]], iterati
 
 
 def resume_after_restart() -> None:
-    """Al arrancar la API: vuelve a encolar lo que quedó a medias por un reinicio y limpia las descargas sin cuenta viejas."""
+    """Al arrancar la API: vuelve a encolar lo que quedó a medias por un reinicio y borra las descargas sin cuenta que no se entregaron."""
     purge_anonymous()
     with SessionLocal() as db:
         to_download, to_resolve = web_jobs.resume_interrupted(db)

@@ -1,11 +1,12 @@
 """Entrega de archivos al equipo del usuario: una canción suelta (MP3) o varias en un ZIP.
 
 Cada entrega suma 1 a `descargas` de cada canción incluida. El ZIP se arma en un archivo temporal sin comprimir
-(los MP3 ya vienen comprimidos) y se borra después de enviarlo.
+(los MP3 ya vienen comprimidos) y se borra después de enviarlo. Las descargas sin cuenta se borran apenas se entregan.
 """
 
 import os
 import re
+import shutil
 import tempfile
 import zipfile
 from pathlib import Path
@@ -15,7 +16,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
-from config.settings import MUSIC_DOWNLOADED_ROOT
+from config.settings import settings
 from infrastructure.persistence.models import Track
 from musictools.download.audio import media_type, safe_name
 
@@ -30,10 +31,10 @@ def _path(track: Track) -> Path | None:
     if not track.archivo:
         return None
     path = Path(track.archivo)
-    path = path if path.is_absolute() else MUSIC_DOWNLOADED_ROOT / path
+    path = path if path.is_absolute() else settings.MUSIC_DOWNLOADED_ROOT / path
     # Nunca fuera de la carpeta de descargas.
     try:
-        path.resolve().relative_to(MUSIC_DOWNLOADED_ROOT.resolve())
+        path.resolve().relative_to(settings.MUSIC_DOWNLOADED_ROOT.resolve())
     except ValueError:
         return None
     return path if path.exists() else None
@@ -70,6 +71,18 @@ def tema_file(track: Track, tema: int) -> Path:
     if position >= len(files):
         raise HTTPException(404, "Ese tema no está guardado.")
     return files[position]
+
+
+def _remove_anonymous(paths: list[Path]) -> None:
+    """Borra lo entregado sin cuenta, y la carpeta del trabajo si quedó vacía."""
+    for path in paths:
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
+        parent = path.parent
+        if parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
 
 
 def _cut(track: Track) -> bool:
@@ -115,16 +128,21 @@ def _serve_local(db: Session, tracks: list[Track], *, name: str, force_zip: bool
     elif modo == "entero" and len(found) == 1 and not found[0][1].is_file():
         raise HTTPException(404, "Esta canción no se guardó entera.")
     if not found:
-        raise HTTPException(404, "El archivo ya no está disponible (las descargas sin cuenta se borran a las 24 h).")
+        raise HTTPException(404, "El archivo ya no está disponible (las descargas sin cuenta se borran al entregarlas).")
 
     for track, _ in found:
         track.descargas = (track.descargas or 0) + 1
     db.commit()
+    anonymous = [path for track, path in found if track.job is not None and track.job.user_id is None]
 
     # Una sola canción con su MP3: se entrega tal cual.
     if not force_zip and len(found) == 1 and found[0][1].is_file():
         path = found[0][1]
-        return FileResponse(path, media_type=media_type(path), filename=path.name, background=BackgroundTask(nube.discard, fetched))
+        def cleanup_one():
+            nube.discard(fetched)
+            _remove_anonymous(anonymous)
+
+        return FileResponse(path, media_type=media_type(path), filename=path.name, background=BackgroundTask(cleanup_one))
 
     fd, tmp = tempfile.mkstemp(suffix=".zip")
     os.close(fd)
@@ -153,5 +171,6 @@ def _serve_local(db: Session, tracks: list[Track], *, name: str, force_zip: bool
     def cleanup():
         os.remove(tmp)
         nube.discard(fetched)
+        _remove_anonymous(anonymous)
 
     return FileResponse(tmp, media_type="application/zip", filename=f"{_safe(name)}.zip", background=BackgroundTask(cleanup))

@@ -17,6 +17,8 @@ from . import progress
 from .progress import TrackCancelled
 
 _UNSAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
+# Segundos que ffmpeg puede pasar sin avanzar antes de cortarlo (configure() en core).
+STALL_TIMEOUT_S = 60
 
 
 class FfmpegError(RuntimeError):
@@ -84,7 +86,7 @@ def _run_with_progress(cmd: list[str], on_seconds, stall_timeout_s: float) -> No
         raise
 
 
-def convert_to_mp3(src: Path, dst: Path, *, bitrate: str = "192k", duration_s: float | None = None, stall_timeout_s: float = 60) -> Path:
+def convert_to_mp3(src: Path, dst: Path, *, bitrate: str = "192k", duration_s: float | None = None, stall_timeout_s: float | None = None) -> Path:
     reporter = progress.current()
     total = duration_s or probe_duration(src)
     started = time.monotonic()
@@ -113,7 +115,7 @@ def convert_to_mp3(src: Path, dst: Path, *, bitrate: str = "192k", duration_s: f
         "-progress", "pipe:1", "-nostats", str(dst),
     ]
     try:
-        _run_with_progress(cmd, on_seconds, stall_timeout_s)
+        _run_with_progress(cmd, on_seconds, stall_timeout_s or STALL_TIMEOUT_S)
     except BaseException:
         dst.unlink(missing_ok=True)
         raise
