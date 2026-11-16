@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Column, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from infrastructure.persistence.database import Base
@@ -142,3 +142,19 @@ class Busqueda(Base):
     clave = Column(String(500), primary_key=True)
     datos = Column(Text, nullable=False)
     updated_at = Column(String, nullable=False)
+
+
+class Carpeta(Base):
+    """Datos de una carpeta de la biblioteca: el nombre que escribió el usuario, si es favorita, dónde vive su música
+    (nube = R2, local = el dispositivo, ambos) y si se sincroniza sola o a mano. `dueno` es el usuario normalizado
+    (la carpeta raíz del usuario) y `slug` el nombre normalizado de la carpeta."""
+    __tablename__ = "carpetas"
+    __table_args__ = (UniqueConstraint("dueno", "slug", name="uq_carpetas_dueno_slug"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    dueno = Column(String(80), nullable=False)
+    slug = Column(String(255), nullable=False)
+    nombre = Column(String(255), nullable=False)
+    favorita = Column(Boolean, default=False, server_default="0", nullable=False)
+    almacenamiento = Column(String(8), default="nube", server_default="nube", nullable=False)
+    sincronizacion = Column(String(8), default="manual", server_default="manual", nullable=False)

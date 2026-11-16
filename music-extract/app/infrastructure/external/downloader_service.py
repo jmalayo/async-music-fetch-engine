@@ -50,8 +50,6 @@ def resolve_output_dir(db: Session, job_id: str) -> Path:
             user = db.get(User, job.user_id)
             out_dir = folders.user_root(user.username) / job_service.slugify(job.carpeta or folders.DEFAULT_FOLDER)
             out_dir.mkdir(parents=True, exist_ok=True)
-            # Guarda el nombre tal como lo escribió el usuario, para mostrarlo en Biblioteca y en el selector.
-            folders.remember_name(out_dir, job.carpeta or folders.DEFAULT_FOLDER)
 
     # Endpoints anteriores (/downloads): como siempre.
     elif job.type == "manual-urls":

@@ -271,7 +271,8 @@ def test_lista_compartida_rechaza_enlaces_de_otros_sitios(client):
 def test_carpetas_listar_buscar_y_crear(client, downloads_root):
     r = client.post("/folders", json={"nombre": "Para Correr 2026"})
     assert r.status_code == 201, r.text
-    assert r.json() == {"nombre": "Para Correr 2026", "slug": "para_correr_2026", "canciones": 0, "favorita": False}
+    assert r.json() == {"nombre": "Para Correr 2026", "slug": "para_correr_2026", "canciones": 0, "favorita": False,
+                        "almacenamiento": "nube", "sincronizacion": "manual"}
     assert (downloads_root / "prueba" / "para_correr_2026").is_dir()
 
     assert client.post("/folders", json={"nombre": "para correr 2026"}).status_code == 409

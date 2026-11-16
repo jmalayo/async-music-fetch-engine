@@ -103,17 +103,16 @@ def rename_folder(db: Session, user: User, slug: str, nombre: str) -> dict:
 
     with _lock:
         tracks = _folder_tracks(db, user, slug)
-        if not tracks and not old_path.is_dir():
+        if not tracks and not folders.exists(old_path):
             raise NotFound("No existe esa carpeta.")
         if any(t.status in BUSY for t in tracks):
             raise Conflict("Hay canciones de esta carpeta descargándose: espera a que terminen.")
-        if new_slug != slug and (new_path.exists() or _folder_tracks(db, user, new_slug)):
+        if new_slug != slug and (folders.exists(new_path) or _folder_tracks(db, user, new_slug)):
             raise folders.FolderExists(f"Ya existe una carpeta llamada «{nombre}».")
 
         if new_slug != slug and old_path.is_dir():
             old_path.rename(new_path)
-        new_path.mkdir(parents=True, exist_ok=True)
-        folders.write_meta(new_path, nombre=nombre)  # conserva la favorita
+        folders.move_meta(old_path, new_path, nombre, db)  # conserva la favorita y dónde vive
 
         old_prefix = f"{root.name}/{slug}/"
         jobs = {t.job_id for t in tracks}
@@ -135,10 +134,11 @@ def delete_folder(db: Session, user: User, slug: str) -> dict:
     path = folders.user_root(user.username) / slug
     with _lock:
         tracks = _folder_tracks(db, user, slug)
-        if not tracks and not path.is_dir():
+        if not tracks and not folders.exists(path):
             raise NotFound("No existe esa carpeta.")
         if any(t.status in BUSY for t in tracks):
             raise Conflict("Hay canciones de esta carpeta descargándose: espera a que terminen.")
+        folders.forget(path, db)
         removed = [t for t in tracks if t.status in LISTED and not t.eliminada]
         bases = [t.nube for t in removed if t.nube]
         freed = sum(_remove_files(db, t) for t in removed)
@@ -184,8 +184,8 @@ def move_tracks(db: Session, user: User, track_ids: list[int], nombre: str) -> d
         if not rows:
             raise NotFound("No hay canciones para mover (o ya están en esa carpeta).")
 
-        if not (target / folders.META_FILE).exists():
-            folders.write_meta(target, nombre=nombre)
+        if not folders.read_meta(target, db).get("nombre"):
+            folders.write_meta(target, db=db, nombre=nombre)
         now = _now()
         moved_job = Job(job_id=job_service.new_job_id(), type="movidas", amount=len(rows), status="completed",
                         origen=rows[0][1].origen, carpeta=nombre, user_id=user.id, elapsed_time_s=0.0,
@@ -239,8 +239,23 @@ def move_tracks(db: Session, user: User, track_ids: list[int], nombre: str) -> d
 def set_favorite(db: Session, user: User, slug: str, favorita: bool) -> dict:
     """Marca o desmarca una carpeta como favorita (aparece primero al cambiar la carpeta de destino)."""
     path = folders.user_root(user.username) / slug
-    if not path.is_dir() and not _folder_tracks(db, user, slug):
+    if not folders.exists(path) and not _folder_tracks(db, user, slug):
         raise NotFound("No existe esa carpeta.")
-    folders.write_meta(path, favorita=bool(favorita))
+    folders.write_meta(path, db=db, favorita=bool(favorita))
+    db.commit()
     nube.library_changed(user.id)
     return {"slug": slug, "favorita": bool(favorita)}
+
+
+def set_storage(db: Session, user: User, slug: str, almacenamiento: str | None, sincronizacion: str | None) -> dict:
+    """Dónde vive la música de la carpeta (nube, local o ambos) y si se sincroniza sola o a mano."""
+    path = folders.user_root(user.username) / slug
+    if not folders.exists(path) and not _folder_tracks(db, user, slug):
+        raise NotFound("No existe esa carpeta.")
+    folders.check_storage(almacenamiento, sincronizacion)
+    changes = {k: v for k, v in (("almacenamiento", almacenamiento), ("sincronizacion", sincronizacion)) if v is not None}
+    if changes:
+        folders.write_meta(path, db=db, **changes)
+        db.commit()
+    nube.library_changed(user.id)
+    return {"slug": slug, **folders.storage_of(path)}

@@ -73,7 +73,8 @@ def library(db: Session = Depends(get_db), user: User = Depends(auth.require_use
         # Orden fijo (la actualizada más recientemente primero): marcar una favorita no la mueve de lugar. Las favoritas
         # van primero solo al elegir la carpeta de destino (/folders).
         "carpetas": sorted(
-            ({**f, "favorita": folders.is_favorite(folders.user_root(user.username) / f["slug"])} for f in by_folder.values()),
+            ({**f, "favorita": folders.is_favorite(folders.user_root(user.username) / f["slug"]),
+              **folders.storage_of(folders.user_root(user.username) / f["slug"])} for f in by_folder.values()),
             key=lambda f: f["actualizada"] or "", reverse=True,
         ),
     }
@@ -84,7 +85,7 @@ def folder(slug: str, db: Session = Depends(get_db), user: User = Depends(auth.r
     """Las canciones de una carpeta, con su categoría, lo que se pidió, lo que se bajó y el score."""
     rows = [(t, j) for t, j in _user_tracks(db, user) if job_service.slugify(j.carpeta or folders.DEFAULT_FOLDER) == slug]
     path = folders.user_root(user.username) / slug
-    if not rows and not path.exists():
+    if not rows and not folders.exists(path):
         raise HTTPException(404, "No existe esa carpeta.")
 
     name = rows[0][1].carpeta if rows else folders.folder_payload(path)["nombre"]
@@ -98,6 +99,7 @@ def folder(slug: str, db: Session = Depends(get_db), user: User = Depends(auth.r
     return {
         "nombre": name, "slug": slug, "tracks": tracks,
         "favorita": folders.is_favorite(path),
+        **folders.storage_of(path),
         # El espacio usado va en todas las secciones de la biblioteca.
         "usado_bytes": web_jobs.used_bytes(db, user.id),
         "cuota_bytes": user.quota_bytes,
@@ -158,6 +160,11 @@ class FavoriteRequest(BaseModel):
     favorita: bool
 
 
+class StorageRequest(BaseModel):
+    almacenamiento: str | None = None
+    sincronizacion: str | None = None
+
+
 @router.post("/tracks/move")
 def move_tracks(body: MoveTracksRequest, db: Session = Depends(get_db), user: User = Depends(auth.require_user)):
     """Mueve las canciones elegidas a otra carpeta (la crea si no existe), con sus archivos."""
@@ -168,3 +175,9 @@ def move_tracks(body: MoveTracksRequest, db: Session = Depends(get_db), user: Us
 def favorite_folder(slug: str, body: FavoriteRequest, db: Session = Depends(get_db), user: User = Depends(auth.require_user)):
     """Marca o desmarca una carpeta como favorita: aparece primero al elegir la carpeta de destino."""
     return _admin(lambda: library_admin.set_favorite(db, user, slug, body.favorita))
+
+
+@router.patch("/folders/{slug}/almacenamiento")
+def folder_storage(slug: str, body: StorageRequest, db: Session = Depends(get_db), user: User = Depends(auth.require_user)):
+    """Dónde vive la música de la carpeta (nube, local o ambos) y si se sincroniza sola o a mano."""
+    return _admin(lambda: library_admin.set_storage(db, user, slug, body.almacenamiento, body.sincronizacion))

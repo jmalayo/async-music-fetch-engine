@@ -949,6 +949,12 @@ def confirm(db: Session, job_id: str) -> list[tuple[int, str, dict | None]]:
             user = db.get(User, job.user_id)
             if used_bytes(db, job.user_id) >= user.quota_bytes:
                 raise Conflict(f"Llegaste a tu límite de almacenamiento ({user.quota_bytes / 1024 ** 3:g} GB). Libera espacio en Biblioteca.")
+            # El nombre de la carpeta tal como lo escribió el usuario (para Biblioteca y el selector): se guarda aquí,
+            # en la misma sesión, y no en los hilos de descarga (no compiten por escribir en SQLite).
+            from core import folders
+
+            nombre = job.carpeta or DEFAULT_FOLDER
+            folders.remember_name(folders.user_root(user.username) / job_service.slugify(nombre), nombre, db)
 
         to_enqueue = []
         for track in db.query(Track).filter(Track.job_id == job_id, Track.status == "preview").order_by(Track.track_id).all():

@@ -11,6 +11,8 @@ router = APIRouter(prefix="/folders", tags=["Web"])
 
 class CreateFolderRequest(BaseModel):
     nombre: str
+    almacenamiento: str = "nube"
+    sincronizacion: str = "manual"
 
 
 @router.get("")
@@ -32,7 +34,7 @@ def list_folders(q: str | None = None, db: Session = Depends(get_db), user: User
 @router.post("", status_code=201)
 def create_folder(body: CreateFolderRequest, user: User = Depends(auth.require_user)):
     try:
-        return folders.create_folder(folders.user_root(user.username), body.nombre)
+        return folders.create_folder(folders.user_root(user.username), body.nombre, body.almacenamiento, body.sincronizacion)
     except folders.InvalidName as e:
         raise HTTPException(422, str(e))
     except folders.FolderExists as e:
