@@ -173,10 +173,21 @@ def _file_exists(track: Track) -> bool:
     return (path if path.is_absolute() else settings.MUSIC_DOWNLOADED_ROOT / path).exists()
 
 
+def track_extension(track: Track) -> str | None:
+    """Extensión del archivo guardado, sin punto y en minúsculas («mp3», «opus», «m4a»…)."""
+    return Path(track.archivo).suffix.lstrip(".").lower() or None if track.archivo else None
+
+
+def _same_format(track: Track, formato: str) -> bool:
+    """Una copia en MP3 sirve para un pedido en MP3; cualquier otra extensión, para un pedido en original."""
+    return (track_extension(track) == "mp3") == (formato == "mp3")
+
+
 def _previously_downloaded(db: Session, urls: list[str], user_id: int | None, tracklist: dict | None = None,
-                           carpeta: str | None = None, tracklist_by_url: dict[str, dict] | None = None) -> dict[str, Track]:
-    """URLs que el mismo usuario ya tiene en su biblioteca, en la misma carpeta y de la misma forma en que las pide
-    ahora (entero o por partes). Sin cuenta no hay biblioteca, así que nunca.
+                           carpeta: str | None = None, tracklist_by_url: dict[str, dict] | None = None,
+                           formato: str = "mp3") -> dict[str, Track]:
+    """URLs que el mismo usuario ya tiene en su biblioteca, en la misma carpeta, en el mismo formato (MP3 u original)
+    y de la misma forma en que las pide ahora (entero o por partes). Sin cuenta no hay biblioteca, así que nunca.
 
     Solo cuenta una descarga con su archivo en disco: ni las copias «ya descargada» (no tienen archivo propio) ni
     las borradas de la biblioteca ni las que perdieron el archivo. Si no, una canción borrada no se podría volver a
@@ -196,6 +207,8 @@ def _previously_downloaded(db: Session, urls: list[str], user_id: int | None, tr
     by_url: dict[str, list[Track]] = {}
     for track, job in rows:
         if slug and job_service.slugify(job.carpeta or DEFAULT_FOLDER) != slug:
+            continue
+        if not _same_format(track, formato):
             continue
         by_url.setdefault(track.url, []).append(track)
 
@@ -476,6 +489,7 @@ def track_payload(track: Track, progreso: dict | None = None) -> dict:
         "updated_at": track.updated_at,
         "archivo_disponible": bool(track.archivo),
         "bytes": track.bytes,
+        "extension": track_extension(track),
         "descargas": track.descargas or 0,
         "recuperada": bool(track.recuperada),
         "url_descargada": _downloaded_url(track) if track.status in ("successful", "incorrect") else None,
@@ -792,9 +806,10 @@ def job_format(db: Session, job: Job | None) -> str:
     return job.formato or "mp3"
 
 
-def set_format(db: Session, job_id: str, formato: str) -> None:
+def set_format(db: Session, job_id: str, formato: str) -> list[tuple[int, str, dict | None]]:
     """MP3 (convertido) u original (Opus o AAC sin convertir), mientras el trabajo está en vista previa. Las
-    canciones individuales («I») se bajan siempre en MP3."""
+    canciones individuales («I») se bajan siempre en MP3. «Ya descargada» depende del formato: se vuelve a calcular
+    (tener una canción en MP3 no impide bajarla también en original). Devuelve las canciones que hay que resolver."""
     if formato not in FORMATOS:
         raise Conflict("Formato no válido: elige «mp3» u «original».")
     with _lock:
@@ -805,50 +820,55 @@ def set_format(db: Session, job_id: str, formato: str) -> None:
             raise Conflict("Una canción individual se baja siempre en MP3.")
         job.formato = formato
         job.updated_at = _now()
+        to_resolve = _recompute_already_downloaded(db, job)
         db.commit()
+    refresh_preview_status(db, job_id)
+    return to_resolve
 
 
 def set_folder(db: Session, job_id: str, carpeta: str | None) -> list[tuple[int, str, dict | None]]:
     """Cambia la carpeta de destino mientras el trabajo está en vista previa. Vacía vuelve a la de por defecto.
-
-    «Ya descargada» depende de la carpeta: se vuelve a calcular. Lo que ya estaba bajado pero no está en la carpeta
-    nueva pasa a la vista previa para bajarse ahí; lo que sí está en la nueva pasa a «ya descargada».
-    Devuelve las canciones que hay que resolver (copias sin vista previa guardada).
-    """
-    to_resolve: list[tuple[int, str, dict | None]] = []
+    «Ya descargada» depende de la carpeta: se vuelve a calcular. Devuelve las canciones que hay que resolver."""
     with _lock:
         job = _get_job(db, job_id)
         if job.status not in ("resolving", "preview"):
             raise Conflict("La carpeta ya no se puede cambiar: el trabajo ya se confirmó.")
         job.carpeta = (carpeta or "").strip() or job.playlist_name or DEFAULT_FOLDER
         job.updated_at = _now()
-
-        tracks = db.query(Track).filter(Track.job_id == job_id).all()
-        candidates = [t for t in tracks if t.ya_descargada or t.status == "preview"]
-        priors = _previously_downloaded(
-            db, [t.url for t in candidates], job.user_id, carpeta=job.carpeta,
-            tracklist_by_url={t.url: _requested_options(t) for t in candidates},
-        )
-        for track in candidates:
-            prior = priors.get(track.url)
-            if prior and not track.ya_descargada:
-                pedido = {k: v for k, v in (_loads(track.tracklist, {}) or {}).items() if k != "pedido"}
-                track.status, track.ya_descargada = "successful", True
-                track.tracklist = json.dumps({**_loads(prior.tracklist, {}), "pedido": pedido}) if track.tracklist else None
-            elif not prior and track.ya_descargada:
-                track.ya_descargada = False
-                if track.tracklist:
-                    track.tracklist = json.dumps(_requested_options(track))
-                if track.preview:
-                    track.status = "preview"
-                else:
-                    track.status = "resolving"
-                    to_resolve.append((track.track_id, track.url, None))
-            else:
-                continue
-            track.updated_at = _now()
+        to_resolve = _recompute_already_downloaded(db, job)
         db.commit()
-        refresh_preview_status(db, job_id)
+    refresh_preview_status(db, job_id)
+    return to_resolve
+
+
+def _recompute_already_downloaded(db: Session, job: Job) -> list[tuple[int, str, dict | None]]:
+    """Tras cambiar la carpeta o el formato: lo que ya estaba bajado pero no coincide pasa a la vista previa para
+    bajarse; lo que sí coincide pasa a «ya descargada». Devuelve las copias sin vista previa guardada (a resolver)."""
+    to_resolve: list[tuple[int, str, dict | None]] = []
+    tracks = db.query(Track).filter(Track.job_id == job.job_id).all()
+    candidates = [t for t in tracks if t.ya_descargada or t.status == "preview"]
+    priors = _previously_downloaded(
+        db, [t.url for t in candidates], job.user_id, carpeta=job.carpeta,
+        tracklist_by_url={t.url: _requested_options(t) for t in candidates}, formato=job_format(db, job),
+    )
+    for track in candidates:
+        prior = priors.get(track.url)
+        if prior and not track.ya_descargada:
+            pedido = {k: v for k, v in (_loads(track.tracklist, {}) or {}).items() if k != "pedido"}
+            track.status, track.ya_descargada = "successful", True
+            track.tracklist = json.dumps({**_loads(prior.tracklist, {}), "pedido": pedido}) if track.tracklist else None
+        elif not prior and track.ya_descargada:
+            track.ya_descargada = False
+            if track.tracklist:
+                track.tracklist = json.dumps(_requested_options(track))
+            if track.preview:
+                track.status = "preview"
+            else:
+                track.status = "resolving"
+                to_resolve.append((track.track_id, track.url, None))
+        else:
+            continue
+        track.updated_at = _now()
     return to_resolve
 
 

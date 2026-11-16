@@ -50,16 +50,21 @@ def library(db: Session = Depends(get_db), user: User = Depends(auth.require_use
     # Carpetas en disco (también las vacías, recién creadas).
     for folder in folders.list_folders(folders.user_root(user.username)):
         by_folder[folder["slug"]] = {"nombre": folder["nombre"], "slug": folder["slug"], "canciones": 0, "bytes": 0,
-                                     "descargada": 0, "recuperada": 0, "dudosa": 0, "fallida": 0, "actualizada": None}
+                                     "descargada": 0, "recuperada": 0, "dudosa": 0, "fallida": 0, "actualizada": None,
+                                     "formatos": {}}
 
     for track, job in _user_tracks(db, user):
         name = job.carpeta or folders.DEFAULT_FOLDER
         slug = job_service.slugify(name)
         entry = by_folder.setdefault(slug, {"nombre": name, "slug": slug, "canciones": 0, "bytes": 0,
-                                            "descargada": 0, "recuperada": 0, "dudosa": 0, "fallida": 0, "actualizada": None})
+                                            "descargada": 0, "recuperada": 0, "dudosa": 0, "fallida": 0, "actualizada": None,
+                                            "formatos": {}})
         entry[category(track)] += 1
         entry["canciones"] += 1
         entry["bytes"] += track.bytes or 0
+        # Cuántas canciones hay de cada formato (extensión del archivo): «mp3», «opus», «m4a»…
+        if ext := web_jobs.track_extension(track):
+            entry["formatos"][ext] = entry["formatos"].get(ext, 0) + 1
         entry["actualizada"] = max(filter(None, [entry["actualizada"], track.updated_at]), default=None)
 
     return {

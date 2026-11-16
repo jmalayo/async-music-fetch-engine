@@ -333,7 +333,7 @@ def update_job(job_id: str, body: UpdateJobRequest, db: Session = Depends(get_db
             raise HTTPException(401, "Inicia sesión para elegir la carpeta.")
         web_jobs.check_owner(db, job_id, user)
         if body.formato is not None:
-            web_jobs.set_format(db, job_id, body.formato)
+            downloader_service.enqueue_resolve(web_jobs.set_format(db, job_id, body.formato))
         if folder:
             downloader_service.enqueue_resolve(web_jobs.set_folder(db, job_id, body.carpeta))
         return web_jobs.preview_payload(db, job_id)
