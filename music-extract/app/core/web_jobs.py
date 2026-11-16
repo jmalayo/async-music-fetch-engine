@@ -508,11 +508,22 @@ def preview_payload(db: Session, job_id: str) -> dict:
         "status": job.status,
         "playlist_name": job.playlist_name,
         "carpeta": job.carpeta,
+        # Dónde vive la carpeta de destino (nube, local o ambos), para mostrarlo junto a su nombre.
+        "almacenamiento": _folder_storage(db, job),
         "formato": job_format(db, job),
         "total": len(tracks),
         "resueltas": sum(1 for t in tracks if t.status != "resolving"),
         "tracks": [track_payload(t) for t in tracks],
     }
+
+
+def _folder_storage(db: Session, job: Job) -> str | None:
+    if job.user_id is None:
+        return None
+    from core import folders
+
+    user = db.get(User, job.user_id)
+    return folders.storage_of(folders.user_root(user.username) / job_service.slugify(job.carpeta or DEFAULT_FOLDER), db)["almacenamiento"]
 
 
 def tracks_payload(db: Session, job_id: str, progress_of) -> list[dict]:

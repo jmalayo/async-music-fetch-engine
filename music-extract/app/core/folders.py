@@ -162,9 +162,9 @@ def folder_payload(path: Path) -> dict:
     }
 
 
-def storage_of(path: Path) -> dict:
+def storage_of(path: Path, db: Session | None = None) -> dict:
     """Dónde vive la música de la carpeta y cómo se sincroniza (por defecto: nube, manual)."""
-    meta = {**DEFAULTS, **read_meta(path)}
+    meta = {**DEFAULTS, **read_meta(path, db)}
     return {"almacenamiento": meta["almacenamiento"], "sincronizacion": meta["sincronizacion"]}
 
 
